@@ -1,0 +1,3384 @@
+% Thesis DO and Extreme Event + Correlation Analysis + Catalogue
+% by Lilly Aßmann-Staudt
+% 09.2026
+
+% Steps
+% 1. DO Data Load
+% 2. Clean Data App first look
+% 3. Any missing days? 
+% 4. Date: linear interpolation
+% 5. Outlier check
+% 5.1 Outlier Jump Threshold -> adjust per station
+% 6. Size of gaps?
+% 7. Interpolation of value gaps 
+%    1-3 Days linear interpolieren
+%    3-6 Days Spline-Interpolation
+% 7.1 climatology interpolation
+% 7.2 day-of-year climatology calculation
+% 7.3 is climatology range stationary? (window ±5 and ±10)
+% 7.4 Breakpoint in climatology range + Mann-Kendall (optional)
+% 8. Plot of clean data
+
+% 9. Detrending DO STL
+% 9.1 Detrending DO log STL
+% 9.2 check for additive or multiplicative
+% 10. DO Trend Analysis
+% 10.1 DO Trend Analysis with one breakpoint (optional)
+% 10.2 DO Trend Analysis with two breakpoints + figure (optional)
+% 10.3 Check for trend in DO seasonal amplitude
+% 10.4 Check for trend in DO seasonal amplitude with breakpoint (optional)
+
+% 11. daily climatology (±5 days window) + figure
+% 11.1 P90 and P10 threshold 
+% 12. Hobday approach to extreme event definition 1:1
+% 13.Extreme event Analysis with own definition -> adjust per station 
+% 13.a Categorizing event days (P10 / Hypoxic / sevHypoxic / bridge day)
+% 13.b Trend analysis of event days per year + figure
+% 13.b.2 Trend with breakpoint (optional)
+% 13.2 Frequency Trend Analysis
+% 13.2.1. Trend with Breakpoint (Quasi-Poisson)
+% 13.3 Event Duration Analysis
+% 13.3.1 Documenting Events in Catalog
+% 13.3.2 Median and Max Event Duration per Year
+% 13.3.3 Trend of Median Duration per Year + figure 
+% 13.3.4 Breakppoint analysis of median duration + figure
+% 13.4 Intensity Analysis 
+% 13.4.1 Figure: cumulative intensity 
+% 13.4.2 Normalizing Duration for Mean and Max Intensity 
+% 13.4.2.a Mean & Maximum Intensity per year (Median)
+% 13.4.2.b Trend: Mean Intensity per Year
+% 13.4.2.c Plot: Mean Intensity per Year
+% 13.4.2.d Breakpoint analysis: Mean Intensity per year
+% 13.4.2.e Plot: Mean Intensity per Year with breakpoint trend 
+% 13.4.2.f Trend: Maximum Intensity per Year
+% 13.4.2.g Plot: Maximum Intensity per Year
+% 13.4.2.h Breakpoint analysis: Maximum Intensity per Year
+% 13.4.2.i Plot: Maximum Intensity per Year with Breakpoint Trend
+
+% 14. Creating Extreme Event Catalog
+% 15. Creating P10 Threshold Catalog
+
+% 16. Driver Analysis 
+% Pattern per driver: 
+% - Load Data
+% - Date interpolation
+% - Outlier Threshold -> adjust per station and driver
+% - outlier interpolation (linear, spline, climatology)
+% - STL Decomposition
+% - how strong does seasonality affect driver? test
+% - seasonal amplitude trend (Mann-Kendall + corrected MK)
+% - (optional) breakpoint trend analysis of seasonal amplitude 
+% - according to seasonal amplitude trend: a) day of year climatology
+%                                          b) rolling window (±5 years)
+%                                          c) 2 phase climatology
+% - calculating anomalies
+
+
+% 17. Cross-Correlation Analysis DO and Driver
+% -> adjust maxLag according to driver
+% - collinearity check between drivers 
+% - multiple regressionmodell: DO anomalie with driver anomalies
+% - linearity control - residuals diagnosis
+
+
+% 18. Correlation Analysis Extreme Event and Driver - driver registry
+% 19. Continue Event Catalog with driver contribution 
+
+% 20. Finish Driver Trend Analysis for greater understanding
+% pattern:
+% - trend analysis + MK or MK corrected
+% - breakpoint analysis + MK or MK corrected (optional)
+
+
+% (21. proxy test: chloro and ph)
+
+% Functions
+
+% IMPORTANT 
+% ADJUST (line 136) JUMPTHRESHOLD ACCORDING TO VALUE 
+
+clc; 
+clear all; 
+close all;
+
+%% 1. Upload Data M
+
+DOraw = readtable("Bunthaus O Con.csv","NumHeaderLines",6,"ReadVariableNames",true,"DecimalSeparator",",");
+DOraw = renamevars(DOraw,["Zeitstempel","Wert"],["time","value"]);
+
+stationName = "Bunthaus";
+
+% 2. Get to Know Data with "Data Clean" 
+
+
+%% 3.Test: Time Frame & Gaps? 
+
+dt = diff(DOraw.time);
+
+% timesteps?
+uniqueSteps = unique(dt);
+disp(uniqueSteps)
+
+% Duplicates? 
+numDuplicates = sum(dt == days(0));
+fprintf('Anzahl doppelter Zeitstempel: %d\n', numDuplicates);
+
+% Missing Rows? 
+numGapRows = sum(dt > days(1));
+fprintf('Anzahl Stellen mit fehlenden Zeilen (Zeitschritt > 1 Tag): %d\n', numGapRows);
+
+if numGapRows > 0
+    gapRowSizes = days(dt(dt > days(1)));
+    fprintf('Größte fehlende Zeilen-Lücke: %d Tage\n', max(gapRowSizes));
+end
+
+% Sorted?
+fprintf('Zeitachse aufsteigend sortiert: %d\n', issorted(DOraw.time));
+
+%% 4. Timeframe without gaps 
+DOraw = table2timetable(DOraw, 'RowTimes','time');
+DOraw = retime(DOraw, 'regular', 'fillwithmissing', 'TimeStep', days(1));
+DOraw = timetable2table(DOraw, 'ConvertRowTimes', true);
+
+
+DOraw.flag = repmat("measurement", height(DOraw), 1);
+DOraw.wasMissingOriginal = isnan(DOraw.value);
+DOraw.flag(DOraw.wasMissingOriginal) = "missing_value";
+DOraw.wasOutlier = false(height(DOraw),1);
+
+% Number of Days
+dt = diff(DOraw.time);
+
+% Timesteps?
+uniqueSteps = unique(dt);
+disp(uniqueSteps)
+
+% Duplicates? 
+numDuplicates = sum(dt == days(0));
+fprintf('Anzahl doppelter Zeitstempel: %d\n', numDuplicates);
+
+% Missing Rows? 
+numGapRows = sum(dt > days(1));
+fprintf('Anzahl Stellen mit fehlenden Zeilen (Zeitschritt > 1 Tag): %d\n', numGapRows);
+
+if numGapRows > 0
+    gapRowSizes = days(dt(dt > days(1)));
+    fprintf('Größte fehlende Zeilen-Lücke: %d Tage\n', max(gapRowSizes));
+end
+
+% Sorted?
+fprintf('Zeitachse aufsteigend sortiert: %d\n', issorted(DOraw.time));
+
+%% 5. Outlier (Rate-of-Change) Methode
+
+dailyJump = [NaN; diff(DOraw.value)];
+
+% Distribution
+figure('Name','Distribution Day-to-Day Jumps');
+histogram(dailyJump, 'BinWidth', 0.1);
+xlabel('Change DO [mg/L] per Day'); 
+ylabel('Frequency'); 
+grid off
+exportgraphics(gcf, 'Distribution Day to Day Jumps.png', 'Resolution', 300);
+prctile(abs(dailyJump), [95 99 99.5 99.9])
+
+% Define Threshold Value (QARTOD Rate-of-Change-Test)
+dailyJump = diff(DOraw.value);
+sdJump = std(dailyJump, 'omitnan');
+threshold_provisional = 6 * sdJump;  
+fprintf('Vorläufiger Rate-of-Change-Schwellenwert (6xSD, QARTOD Test 7): %.2f mg/L/Tag\n', threshold_provisional);
+
+out30 = abs(dailyJump) > threshold_provisional;
+sum(out30)
+
+%% 5.1
+jumpThreshold = 2.52;  % ADJUST ACCORDINGLY 
+
+diffPrev = [NaN; diff(DOraw.value)];
+diffNext = [diff(DOraw.value); NaN];
+
+isSpike = abs(diffPrev) > jumpThreshold & abs(diffNext) > jumpThreshold;
+
+fprintf('Als isolierter Spike markiert: %d Punkte\n', sum(isSpike));
+
+DOraw.value(isSpike) = NaN;
+DOraw.wasOutlier(isSpike) = true;
+DOraw.flag(isSpike) = "outlier_rateofchange";
+%% 6. Size NaN Gaps?
+
+missingData = isnan(DOraw.value); 
+missingIndices = find(missingData); 
+numMissing = sum(missingData); 
+
+d = diff([0;missingData(:);0]);
+gapStart = find(d==1);
+gapEnd = find(d== -1) -1;
+
+gapLength = gapEnd-gapStart + 1;
+maxGap =max(gapLength);
+numGaps = numel(gapLength);
+
+figure;
+histogram(gapLength,BinWidth=1);
+
+%% 7. Interpolation 
+% 1-3 Days linear interpolieren
+% 3-6 Days Spline-Interpolation
+% >6 Days: Climatological Filling 
+
+% Lineare Interpolation
+nanBefore = isnan(DOraw.value);
+DOraw.value = fillmissing(DOraw.value, 'linear', 'MaxGap',3);
+DOraw.flag(nanBefore & ~isnan(DOraw.value)) = "linear_interpoliert"; 
+
+% Spline-Interpolation 
+nanBefore = isnan(DOraw.value);
+DOraw.value = fillmissing(DOraw.value, 'spline', 'MaxGap', 6);
+DOraw.flag(nanBefore & ~isnan(DOraw.value)) = "spline_interpoliert"; 
+
+%% 7.1 Climatological Filling
+
+doy = day(DOraw.time, 'dayofyear');
+validIdx = ~isnan(DOraw.value);
+[G, doyList] = findgroups(doy(validIdx));
+climMean = splitapply(@mean, DOraw.value(validIdx), G);
+climLookup = nan(366,1);
+climLookup(doyList) = climMean;
+
+missingIdx = isnan(DOraw.value);
+DOraw.value(missingIdx) = climLookup(doy(missingIdx));
+DOraw.flag(missingIdx) = "klimatologisch_gefuellt";
+
+assert(sum(isnan(DOraw.value)) == 0, "Es sind noch NaN in DOraw.value vorhanden.");
+
+summary(categorical(DOraw.flag))
+
+%% 7.2 Climatology
+doy = day(DOraw.time, 'dayofyear');
+[G_doy, doyList] = findgroups(doy);
+clim_doy_mean   = splitapply(@(x) mean(x,'omitnan'),   DOraw.value, G_doy);
+clim_doy_median = splitapply(@(x) median(x,'omitnan'), DOraw.value, G_doy);
+
+figure('Name','Climatology DO');
+plot(doyList, clim_doy_mean, '-'); hold on
+plot(doyList, clim_doy_median, '--');
+
+% monthly ticks
+monthStarts = datetime(2001,1:12,1);
+xticks(day(monthStarts, 'dayofyear'));
+xticklabels({'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'});
+xlim([1 366]);
+
+xlabel('Month'); ylabel('DO [mg/L]');
+legend('Mean','Median'); 
+grid off
+title('Climatology DO-Concentration');
+exportgraphics(gcf, 'Climatology DO.png', 'Resolution', 300);
+%% 7.3 Rooling Window for Climatology Check 
+
+years_all = year(DOraw.time);
+firstYear = min(years_all);
+lastYear  = max(years_all);
+rollResults = struct();
+
+for w = 1:numel(windowSizes)
+    windowYears = windowSizes(w);
+    startYears = firstYear : (lastYear - windowYears + 1);
+    amplitude = nan(numel(startYears),1);
+    for i = 1:numel(startYears)
+        winIdx = years_all >= startYears(i) & years_all < startYears(i) + windowYears;
+        doy_win = day(DOraw.time(winIdx), 'dayofyear');
+        val_win = DOraw.value(winIdx);
+        [G, ~] = findgroups(doy_win);
+        clim_win = splitapply(@(x) mean(x,'omitnan'), val_win, G);
+        amplitude(i) = max(clim_win) - min(clim_win);
+    end
+    f = sprintf('w%d', windowYears);
+    rollResults.(f).midYears  = startYears + windowYears/2;
+    rollResults.(f).amplitude = amplitude;
+end
+
+figure('Name','Rolling Climatology Range: Window Comparison'); hold on
+plot(rollResults.w5.midYears,  rollResults.w5.amplitude,  '-o', 'DisplayName','5 Year Window');
+plot(rollResults.w10.midYears, rollResults.w10.amplitude, '-o', 'DisplayName','10 Year Window');
+xlabel('Time'); ylabel('Climatology Range [mg/L]');
+legend('Location','northwest'); 
+grid off
+title('Climatology Range over Time - Comparison 5 vs. 10 Jahre');
+exportgraphics(gcf, 'Rolling Climatology Range: Window Comparison.png', 'Resolution', 300);
+
+%% 7.4 Mann-Kendall Breakpoint 
+
+[~, troughIdx] = min(rollResults.w10.amplitude);
+troughYear = rollResults.w10.midYears(troughIdx);
+fprintf('Wendepunkt (10-Jahres-Fenster) bei Fenstermitte %.1f\n', troughYear);
+
+mid10  = rollResults.w10.midYears;
+ampl10 = rollResults.w10.amplitude;
+phase1 = ampl10(mid10 <= troughYear);
+phase2 = ampl10(mid10 >  troughYear);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phase1), numel(phase2));
+
+[~, tau1, p1, sig1] = mannKendall(phase1);  slope1 = sensSlope(phase1);
+[~, tau2, p2, sig2] = mannKendall(phase2);  slope2 = sensSlope(phase2);
+
+fprintf('Phase 1 (bis %.1f): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', troughYear, tau1,p1,sig1,slope1);
+fprintf('Phase 2 (ab %.1f):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', troughYear, tau2,p2,sig2,slope2);
+
+%% 8. Plot of clean data
+
+figure ("Name", "Cleaned Raw TS"); 
+plot(DOraw.time,DOraw.value)
+hold on
+xlabel("Time");
+ylabel("DO [mg/L]");
+title("DO Concentration at "+ stationName);
+grid off
+exportgraphics(gcf, 'Cleaned Raw TS.png', 'Resolution', 300);
+
+%% =======================================================================
+%
+% Data Preparation Done - DOraw is adjusted
+%
+% ========================================================================
+%% 9. Detrending STL 
+
+TT = table2timetable(DOraw(:,["time","value"]));
+
+% Detrending using STL decomposition
+[longtermTrend, seasonalTrend, residual] = trenddecomp(TT.value, 'stl', 365);
+figure("Name", "STL Decomposition");
+subplot(4,1,1), plot(TT.time, TT.value), title('Original DO Data'), grid off;
+subplot(4,1,2), plot(TT.time, longtermTrend), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT.time, seasonalTrend), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT.time, residual), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition.png', 'Resolution', 300);
+
+%% 9.1 Control: STL with log Data 
+
+[longtermTrendlog, seasonalTrendlog, residuallog] = trenddecomp(log(TT.value), 'stl', 365);
+figure("Name", "STL Decomposition (log)");
+subplot(4,1,1), plot(TT.time, TT.value), title('Original DO Data'), grid off;
+subplot(4,1,2), plot(TT.time, longtermTrendlog), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT.time, seasonalTrendlog), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT.time, residuallog), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition log.png', 'Resolution', 300);
+
+%% 9.2 Testing: additive vs. multiplikative
+
+figure('Name','Additiv vs. multiplikativ - Residuen-Diagnose');
+subplot(2,1,1)
+scatter(longtermTrend, residual, 5, 'filled');
+xlabel('Long-term Trend (raw)'); ylabel('Residual (raw)');
+title('Additive: Residuals vs. Trendlevel'); grid off
+
+subplot(2,1,2)
+scatter(longtermTrendlog, residuallog, 5, 'filled');
+xlabel('Long-term Trend (log)'); ylabel('Residual (log)');
+title('Multiplicative (log): Residuals vs. Trendlevel'); grid off
+
+corrRaw = corr(longtermTrend, abs(residual), 'rows','complete');
+corrLog = corr(longtermTrendlog, abs(residuallog), 'rows','complete');
+fprintf('Korrelation |Residual| mit Trendniveau (roh): %.3f\n', corrRaw);
+fprintf('Korrelation |Residual| mit Trendniveau (log): %.3f\n', corrLog);
+exportgraphics(gcf, 'Additiv vs. multiplikativ - Residuen-Diagnose.png', 'Resolution', 300);
+
+%% 10. Trend analysis - Mann-Kendall & Sen's Slope 
+
+years = year(TT.time);
+[G, yearList] = findgroups(years);
+annualTrendSTL = splitapply(@(x) mean(x, 'omitnan'), longtermTrend, G);
+
+[~, tauSTL, pSTL, sigSTL] = mannKendall(annualTrendSTL);
+slopeSTL = sensSlope(annualTrendSTL);
+fprintf('DO Niveau-Trend (Ganzzeitraum): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', tauSTL, pSTL, sigSTL, slopeSTL);
+
+figure('Name','Annual Mean STL-Trend - DO');
+plot(yearList, annualTrendSTL, '-o', 'Color',[0.5 0.5 0.5], 'DisplayName','Annual Mean STL-Trend');
+hold on
+b_STL = median(annualTrendSTL) - slopeSTL*median(yearList);
+plot(yearList, slopeSTL*yearList + b_STL, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Sen-Slope = %.4f mg/L/Year, p = %.3f', slopeSTL, pSTL));
+xlabel('Year'); ylabel('STL-Trend Component [mg/L]');
+title('Annual Mean STL-Trend - DO');
+legend('Location','northeast'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend - DO.png', 'Resolution', 300);
+
+%% 10.1 Breakpoint Analysis (STL-Trend)
+
+ipt2 = findChangepointLinear(annualTrendSTL, 3);
+breakYearSTL = yearList(ipt2);
+fprintf('Struktureller Bruchpunkt (STL-Trend) bei Jahr %d\n', breakYearSTL);
+
+phase1STL = annualTrendSTL(yearList < breakYearSTL);
+phase2STL = annualTrendSTL(yearList >= breakYearSTL);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phase1STL), numel(phase2STL));
+
+[~, tau1s, p1s, sig1s] = mannKendall(phase1STL); slope1s = sensSlope(phase1STL);
+[~, tau2s, p2s, sig2s] = mannKendall(phase2STL); slope2s = sensSlope(phase2STL);
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYearSTL, tau1s,p1s,sig1s,slope1s);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYearSTL, tau2s,p2s,sig2s,slope2s);
+
+%% 10.2 Autocorrelation Check 
+
+n1 = length(phase1STL); xbar1 = mean(phase1STL);
+r1_phase1 = sum((phase1STL(1:end-1)-xbar1).*(phase1STL(2:end)-xbar1)) / sum((phase1STL-xbar1).^2);
+ciBound1 = 1.96/sqrt(n1);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_phase1, ciBound1);
+
+[b1, b2, sse2] = findChangepointLinear2(annualTrendSTL, 3);
+breakYear1 = yearList(b1);
+breakYear2 = yearList(b2);
+fprintf('Bruchpunkte (STL-Trend): %d und %d\n', breakYear1, breakYear2);
+
+phase1 = annualTrendSTL(yearList < breakYear1);
+phase2 = annualTrendSTL(yearList >= breakYear1 & yearList < breakYear2);
+phase3 = annualTrendSTL(yearList >= breakYear2);
+fprintf('Phase 1: n=%d, Phase 2: n=%d, Phase 3: n=%d\n', numel(phase1), numel(phase2), numel(phase3));
+
+[~, tau1, p1v, sig1] = mannKendall(phase1); slope1 = sensSlope(phase1);
+[~, tau2, p2v, sig2] = mannKendall(phase2); slope2 = sensSlope(phase2);
+[~, tau3, p3v, sig3] = mannKendall(phase3); slope3 = sensSlope(phase3);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYear1, tau1,p1v,sig1,slope1);
+fprintf('Phase 2 (%d-%d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYear1, breakYear2, tau2,p2v,sig2,slope2);
+fprintf('Phase 3 (ab %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYear2, tau3,p3v,sig3,slope3);
+
+figure('Name','Trend Analysis STL: Three Phases');
+plot(yearList, annualTrendSTL, 'o-', 'Color', [0 0 0],'LineWidth', 1.2, 'DisplayName', 'Annual Mean STL-Trend');
+hold on;
+
+t1 = yearList(yearList < breakYear1);
+t2 = yearList(yearList >= breakYear1 & yearList < breakYear2);
+t3 = yearList(yearList >= breakYear2);
+
+b1 = median(phase1) - slope1*median(t1);
+plot(t1, slope1*t1 + b1, 'b-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 1: Sen=%.2f mg/L/Year, p=%.2f', slope1, p1v));
+
+b2 = median(phase2) - slope2*median(t2);
+plot(t2, slope2*t2 + b2, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 2: Sen=%.2f mg/L/Year, p=%.2f', slope2, p2v));
+
+b3 = median(phase3) - slope3*median(t3);
+plot(t3, slope3*t3 + b3, 'g-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 3: Sen=%.2f mg/L/Year, p=%.2f', slope3, p3v));
+
+xline(breakYear1, '--k', 'HandleVisibility','off');
+xline(breakYear2, '--k', 'HandleVisibility','off');
+
+xlabel('Time'); ylabel('STL-Trendcomponent, Annual Mean [mg/L]');
+title('Bunthaus: STL Trend Analysis: Three Phases');
+legend('Location','south');
+grid off;
+hold off;
+exportgraphics(gcf, 'Bunthaus: STL Trend Analysis: Three Phases.png', 'Resolution', 300);
+
+%% 10.3 Amplitude-Trend (formal, STL-Saisoncomponente)
+
+years = year(DOraw.time);
+[G, yearList] = findgroups(years);
+
+annualSeasonalRange = splitapply(@(x) max(x)-min(x), seasonalTrend, G);
+annualSeasonalStd   = splitapply(@std, seasonalTrend, G);
+
+figure('Name','Annual Seasonal Amplitude (STL)');
+subplot(2,1,1)
+plot(yearList, annualSeasonalRange, '-o'); xlabel('Year'); ylabel('Range [mg/L]');
+title('Annual range of the seasonal component'); grid off
+subplot(2,1,2)
+plot(yearList, annualSeasonalStd, '-o'); xlabel('Year'); ylabel('Std [mg/L]');
+title('Annual standard deviation of the seasonal component'); grid off
+exportgraphics(gcf, 'Annual Seasonal Amplitude (STL).png', 'Resolution', 300);
+
+% Mann-Kendall & Sen's Slope
+[~, tau_r, p_r, sig_r] = mannKendall(annualSeasonalRange);
+slope_r = sensSlope(annualSeasonalRange);
+fprintf('Spannweite: tau=%.2f, p=%.2f, sig=%d, Sen-Slope=%.2f mg/L/Jahr\n', tau_r, p_r, sig_r, slope_r);
+
+[~, tau_s, p_s, sig_s] = mannKendall(annualSeasonalStd);
+slope_s = sensSlope(annualSeasonalStd);
+fprintf('Std-Abw.:   tau=%.2f, p=%.2f, sig=%d, Sen-Slope=%.2f mg/L/Jahr\n', tau_s, p_s, sig_s, slope_s);
+
+% Autocorrelations
+xbar = mean(annualSeasonalRange); n = length(annualSeasonalRange);
+r1 = sum((annualSeasonalRange(1:end-1)-xbar).*(annualSeasonalRange(2:end)-xbar)) / sum((annualSeasonalRange-xbar).^2);
+fprintf('Lag-1-Autokorrelation (Spannweite): r1=%.3f (Grenze ±%.3f)\n', r1, 1.96/sqrt(n));
+
+[~, ~, p_r_corr, sig_r_corr, neff_r] = mannKendallCorrected(annualSeasonalRange, r1);
+[~, ~, p_s_corr, sig_s_corr, neff_s] = mannKendallCorrected(annualSeasonalStd, r1);
+
+fprintf('Spannweite korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_r_corr, sig_r_corr, neff_r, numel(annualSeasonalRange));
+fprintf('Std-Abw. korrigiert:   p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_s_corr, sig_s_corr, neff_s, numel(annualSeasonalStd));
+
+meanPhase1 = mean(phase1);
+meanPhase2 = mean(phase2);
+meanPhase3 = mean(phase3);
+fprintf('Mittelwert Phase 1 (vor %d): %.2f mg/L\n', breakYear1, meanPhase1);
+fprintf('Mittelwert Phase 2 (%d-%d): %.2f mg/L\n', breakYear1, breakYear2, meanPhase2);
+fprintf('Mittelwert Phase 3 (ab %d): %.2f mg/L\n', breakYear2, meanPhase3);
+
+%% 10.4 With Breakpoint
+
+[bR, sseR] = findChangepointLinear(annualSeasonalRange, 3);
+breakYearR = yearList(bR);
+fprintf('Bruchpunkt (Spannweite): %d\n', breakYearR);
+
+phaseR1 = annualSeasonalRange(yearList < breakYearR);
+phaseR2 = annualSeasonalRange(yearList >= breakYearR);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseR1), numel(phaseR2));
+
+[~, tauR1, pR1, sigR1] = mannKendall(phaseR1); slopeR1 = sensSlope(phaseR1);
+[~, tauR2, pR2, sigR2] = mannKendall(phaseR2); slopeR2 = sensSlope(phaseR2);
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYearR, tauR1,pR1,sigR1,slopeR1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f\n', breakYearR, tauR2,pR2,sigR2,slopeR2);
+
+n1 = numel(phaseR1); xbar1 = mean(phaseR1);
+r1_p1 = sum((phaseR1(1:end-1)-xbar1).*(phaseR1(2:end)-xbar1)) / sum((phaseR1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_p1, 1.96/sqrt(n1));
+
+n2 = numel(phaseR2); xbar2 = mean(phaseR2);
+r1_p2 = sum((phaseR2(1:end-1)-xbar2).*(phaseR2(2:end)-xbar2)) / sum((phaseR2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_p2, 1.96/sqrt(n2));
+
+[~, ~, pR1c, sigR1c, neffR1] = mannKendallCorrected(phaseR1, r1_p1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pR1c, sigR1c, neffR1, numel(phaseR1));
+
+[~, ~, pR2c, sigR2c, neffR2] = mannKendallCorrected(phaseR2, r1_p2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pR2c, sigR2c, neffR2, numel(phaseR2));
+
+meanPhaseR1 = mean(phaseR1);
+meanPhaseR2 = mean(phaseR2);
+fprintf('Mittelwert Spannweite Phase 1 (vor %d): %.2f mg/L\n', breakYearR, meanPhaseR1);
+fprintf('Mittelwert Spannweite Phase 2 (ab %d):  %.2f mg/L\n', breakYearR, meanPhaseR2);
+
+
+%% From here on, the extreme event analysis begins
+
+% 1. Calculate daily climatologies over the entire period (because even though
+% the seasonal amplitude has changed, it has not shown a
+% significant trend so far), using a window of 11 days total (+- 5 -->
+% analogous to Hobday) - increases the comparison values from 30 to
+% 30 x 11 = 330 measurements per calendar day.
+% 1.1 Calculate the climatological mean and the 90th and 10th percentiles
+% 1.2 Threshold values for an extreme event are then below 10%,
+% less-than-or-equal to 4 mg/L, and less-than-or-equal to 2 mg/L
+
+%% 11. Day of Year Climatology Station-specific 
+
+doy = day(DOraw.time, 'dayofyear'); 
+windowRadius = 5;
+nDoy = 366;
+
+climP10 = NaN(nDoy,1);
+climP90 = NaN(nDoy,1);
+
+for d = 1:nDoy
+    windowDoys = mod((d-windowRadius : d+windowRadius) -1, nDoy) +1;
+    inWindow = ismember(doy, windowDoys);
+    climP10(d) = prctile(DOraw.value(inWindow),10);
+    climP90(d) = prctile(DOraw.value(inWindow),90);
+end
+
+assert(sum(isnan(climP10)) == 0, "Mindestens einer fehlt für P10");
+assert(sum(isnan(climP90)) == 0, "Mindesten einer fehlt für P90");
+
+figure ("Name","Climatology + 10 and 90 Percentile "+stationName);
+fill([1:nDoy, fliplr(1:nDoy)],[climP10',fliplr(climP90')],[0.85 0.85 1], "EdgeColor","none","DisplayName","P10 - P90 Range");
+hold on
+plot(doyList, clim_doy_mean, "k-","LineWidth",1.5,"DisplayName","Climatology Mean");
+
+monthStarts = datetime(2001,1:12,1); 
+xticks(day(monthStarts, "dayofyear"));
+xticklabels({'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'});
+xlim([1 366]);
+
+xlabel("Month");
+ylabel("DO [mg/L]");
+title("Climatology P10 P90 "+stationName);
+legend("Location","best");
+grid off
+exportgraphics(gcf, 'Climatology + 10 and 90 Percentile.png', 'Resolution', 300);
+
+%% 11.1 Threshold values
+
+p10_threshold = climP10(doy);
+p90_threshold = climP90(doy);
+
+is_below_p10 = DOraw.value < p10_threshold;
+is_hypoxic = DOraw.value <= 4;
+is_sevHypoxic = DOraw.value <= 2;
+is_event    = is_below_p10 | is_hypoxic;
+
+fprintf('Tage unter P10 :%d (%.1f%% aller Tage)\n',sum(is_below_p10), 100*sum(is_below_p10)/height(DOraw));
+fprintf('Hypoxische Tage (<= 4 mg/L): %d (%.1f%% aller Tage)\n',sum(is_hypoxic), 100*sum(is_hypoxic)/height(DOraw));
+fprintf('Anoxische Tage (<= 2 mg/L):  %d (%.1f%% aller Tage)\n', sum(is_sevHypoxic), 100*sum(is_sevHypoxic)/height(DOraw));
+
+%% 12 Duration & Gap for Extreme Event Definition
+
+% Approach: run an analysis with 1:1 (one day below threshold
+% is an extreme, and it is separated from another extreme by one day above
+% threshold).
+% Then look at the median and mean length and gap
+
+[~, ev_start_raw, ev_end_raw] = count_events_hobday(is_event, 1, 1);
+
+ev_duration_raw = ev_end_raw - ev_start_raw + 1;
+
+ev_gap_raw = ev_start_raw(2:end) - ev_end_raw(1:end-1) - 1;
+
+fprintf('=== Rohevents (min_duration=1, max_gap=1) ===\n');
+fprintf('Anzahl Rohevents: %d\n', length(ev_duration_raw));
+fprintf('Dauer - Median: %.1f Tage, Mean: %.2f Tage\n', median(ev_duration_raw), mean(ev_duration_raw));
+fprintf('Lücke - Median: %.1f Tage, Mean: %.2f Tage\n', median(ev_gap_raw), mean(ev_gap_raw));
+
+figure('Name','Verteilung Dauer und Lücke der Rohevents - ' + stationName);
+subplot(1,2,1)
+histogram(ev_duration_raw, 'BinWidth', 1);
+xlabel('Event Duration [Days]'); ylabel('Frequency'); grid off
+title('Duration of Raw Events (1:1)');
+subplot(1,2,2)
+histogram(ev_gap_raw, 'BinWidth', 1);
+xlabel('Gap between Events [Days]'); ylabel('Frequency'); grid off
+title('Gaps between Raw Events (1:1)');
+exportgraphics(gcf, 'Verteilung Dauer und Lücke der Rohevents.png', 'Resolution', 300);
+
+for g = 1:5
+    pct = 100 * sum(ev_gap_raw <= g) / length(ev_gap_raw);
+    fprintf('Anteil Lücken <= %d Tage(n): %.1f%%\n', g, pct);
+end
+
+%% 13 Extreme Event Analysis
+
+min_duration = 5;
+max_gap = 2;
+
+[n_events, ev_start, ev_end] = count_events_hobday(is_event,min_duration,max_gap);
+is_hobday_event = false(size(is_event));
+for i = 1:length(ev_start)
+    is_hobday_event(ev_start(i):ev_end(i)) = true;
+end
+fprintf("Number of Found Events: %d\n",n_events);  
+
+years = year(DOraw.time);
+yearList = unique(years);
+nYears = length(yearList);
+ev_year = year(DOraw.time(ev_start)); 
+
+n_events_per_year = NaN(nYears,1);       
+n_days_below_per_year = NaN(nYears,1);    
+
+for k = 1:nYears
+    idx_yr = years == yearList(k);
+    n_events_per_year(k) = sum(ev_year == yearList(k));
+    n_days_below_per_year(k) = sum(is_hobday_event(idx_yr));
+end
+
+%% 13.a Categorize Event Days  (P10 / Hypoxic / Severe Hypoxic / Bridge)
+
+category = zeros(height(DOraw), 1);               
+category(is_hobday_event)                = 4;    
+category(is_hobday_event & is_below_p10) = 1;      
+category(is_hobday_event & is_hypoxic)   = 2;     
+category(is_hobday_event & is_sevHypoxic)    = 3;     
+
+fprintf('Überbrückte Eventtage ohne eigene Schwellenwert-Unterschreitung: %d\n', sum(category==4));
+
+n_p10_per_year     = NaN(nYears,1);
+n_hypoxic_per_year = NaN(nYears,1);
+n_sevHypoxic_per_year  = NaN(nYears,1);
+n_bridge_per_year  = NaN(nYears,1);
+
+for k = 1:nYears
+    idx_yr = years == yearList(k);
+    n_p10_per_year(k)     = sum(category(idx_yr) == 1);
+    n_hypoxic_per_year(k) = sum(category(idx_yr) == 2);
+    n_sevHypoxic_per_year(k)  = sum(category(idx_yr) == 3);
+    n_bridge_per_year(k)  = sum(category(idx_yr) == 4);
+end
+
+assert(isequal(n_p10_per_year + n_hypoxic_per_year + n_sevHypoxic_per_year + n_bridge_per_year, ...
+    n_days_below_per_year), "Kategorien summieren sich nicht zu den Eventtagen pro Jahr.");
+
+categoryData   = [n_p10_per_year, n_hypoxic_per_year, n_sevHypoxic_per_year, n_bridge_per_year];
+categoryColors = [0.7 0.8 1;    
+                   1   0   1;    
+                   1   0   0;    
+                   0.6 0.6 0.6]; 
+
+%% 13.b Trend analysis of event days per year
+
+[~, tau_days, p_days, sig_days] = mannKendall(n_days_below_per_year);
+slope_days = sensSlope(n_days_below_per_year);
+fprintf('Trend Eventtage/Jahr: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f Tage/Jahr\n', ...
+    tau_days, p_days, sig_days, slope_days);
+
+figure("Name","Event-Days per Year at "+stationName);
+bar(yearList,n_days_below_per_year, "FaceColor",[0 0 1], "DisplayName","Number of Event-Days");
+hold on
+b_days = median(n_days_below_per_year) - slope_days*median(yearList);
+plot(yearList, slope_days*yearList + b_days, "r-", "LineWidth",2, ...
+    "DisplayName",sprintf("Sen-Slope = %.3f Days/Year, p = %.3f", slope_days,p_days));
+grid off
+xlabel("Year");
+ylabel("Number Event-Days");
+title("Number of Event-Days per Year at "+stationName);
+legend("Location","northwest");
+exportgraphics(gcf, 'Event-Days per Year.png', 'Resolution', 300);
+
+%%
+
+figure("Name","Categorized Event-Days per Year at " + stationName);
+b = bar(yearList, categoryData, "stacked");
+for c = 1:numel(b)
+    b(c).FaceColor = categoryColors(c,:);
+end
+b(1).DisplayName = "Below P10";
+b(2).DisplayName = "Hypoxic";
+b(3).DisplayName = "severe Hypoxic";
+b(4).DisplayName = "Gap Day";
+hold on
+
+plot(yearList, slope_days*yearList + b_days, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Sen-Slope = %.3f Days/Year, p = %.3f", slope_days, p_days));
+grid off
+xlabel("Year"); ylabel("Number of Event-Days");
+title("Categorized Event-Days per Year at " + stationName);
+legend("Location","best");
+exportgraphics(gcf, 'Categorized Event-Days per Year.png', 'Resolution', 300);
+
+%% 13.b.2 Trend with Breakpoint
+
+[bDays, sseDays] = findChangepointLinear(n_days_below_per_year, 3);
+breakYearDays = yearList(bDays);
+fprintf('Bruchpunkt (Eventtage pro Jahr): %d\n', breakYearDays);
+
+phaseDays1 = n_days_below_per_year(yearList <  breakYearDays);
+phaseDays2 = n_days_below_per_year(yearList >= breakYearDays);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseDays1), numel(phaseDays2));
+
+[~, tauDays1, pDays1, sigDays1] = mannKendall(phaseDays1); slopeDays1 = sensSlope(phaseDays1);
+[~, tauDays2, pDays2, sigDays2] = mannKendall(phaseDays2); slopeDays2 = sensSlope(phaseDays2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f Tage/Jahr\n', breakYearDays, tauDays1,pDays1,sigDays1,slopeDays1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f Tage/Jahr\n', breakYearDays, tauDays2,pDays2,sigDays2,slopeDays2);
+
+n1 = numel(phaseDays1); xbar1 = mean(phaseDays1);
+r1_days1 = sum((phaseDays1(1:end-1)-xbar1).*(phaseDays1(2:end)-xbar1)) / sum((phaseDays1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_days1, 1.96/sqrt(n1));
+
+n2 = numel(phaseDays2); xbar2 = mean(phaseDays2);
+r1_days2 = sum((phaseDays2(1:end-1)-xbar2).*(phaseDays2(2:end)-xbar2)) / sum((phaseDays2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_days2, 1.96/sqrt(n2));
+
+[~, ~, pDays1c, sigDays1c, neffDays1] = mannKendallCorrected(phaseDays1, r1_days1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pDays1c, sigDays1c, neffDays1, numel(phaseDays1));
+
+[~, ~, pDays2c, sigDays2c, neffDays2] = mannKendallCorrected(phaseDays2, r1_days2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pDays2c, sigDays2c, neffDays2, numel(phaseDays2));
+
+figure("Name","Event-Days per Year with Breakpoint-Trend at " + stationName);
+bar(yearList, n_days_below_per_year, "FaceColor",[0 0 1], "DisplayName","Event-Days per Year");
+hold on
+t1 = yearList(yearList <  breakYearDays);
+t2 = yearList(yearList >= breakYearDays);
+b1 = median(phaseDays1) - slopeDays1*median(t1);
+plot(t1, slopeDays1*t1 + b1, "g-", "LineWidth", 2,"DisplayName", sprintf("Phase 1: Sen=%.3f Days/Year, p=%.3f", slopeDays1, pDays1));
+b2 = median(phaseDays2) - slopeDays2*median(t2);
+plot(t2, slopeDays2*t2 + b2, "r-", "LineWidth", 2,"DisplayName", sprintf("Phase 2: Sen=%.3f Days/Year, p=%.3f", slopeDays2, pDays2));
+xline(breakYearDays, "--k", "HandleVisibility","off");
+grid off
+xlabel("Year"); ylabel("Number of Event-Days");
+title("Event-Days per Year with Breakpoint-Trend  at " + stationName);
+legend("Location","north");
+exportgraphics(gcf, 'Event-Days per Year with Breakpoint-Trend.png', 'Resolution', 300);
+
+%%
+
+figure("Name","Categorized Event-Days per Year with Breakpoint-Trend at " + stationName);
+b = bar(yearList, categoryData, "stacked");
+for c = 1:numel(b)
+    b(c).FaceColor = categoryColors(c,:);
+end
+b(1).DisplayName = "Below P10";
+b(2).DisplayName = "Hypoxic";
+b(3).DisplayName = "sevHypoxic";
+b(4).DisplayName = "Gap Day";
+hold on
+plot(t2, slopeDays2*t2 + b2, "k-", "LineWidth", 2, ...
+"DisplayName", sprintf("Phase 2: Sen=%.3f Days/Year, p=%.3f", slopeDays2, pDays2));
+plot(t1, slopeDays1*t1 + b1, "k-", "LineWidth", 2, ...
+"DisplayName", sprintf("Phase 1: Sen=%.3f Days/Year, p=%.3f", slopeDays1, pDays1));
+xline(breakYearDays, ":k", "HandleVisibility","off");
+grid off
+xlabel("Year"); ylabel("Number of Event-Days");
+title("Categorized Event-Days per Year with Breakpoint-Trend at " + stationName);
+legend("Location","best");
+exportgraphics(gcf, 'Categorized Event-Days per Year with Breakpoint-Trend.png', 'Resolution', 300);
+
+%% 13.2 Analysis of Frequency of Extremevents
+% Quasi-Poisson-Trend 
+
+x_years = yearList - yearList(1);
+mdl_poisson = fitglm(x_years, n_events_per_year, 'Distribution','poisson');
+disp(mdl_poisson)
+
+mu_hat = mdl_poisson.Fitted.Response;
+pearsonResid = (n_events_per_year - mu_hat) ./ sqrt(mu_hat);
+pearsonChi2  = sum(pearsonResid.^2);
+dispersionPhi = pearsonChi2 / mdl_poisson.DFE;
+fprintf('Overdispersion-Parameter (phi): %.3f\n', dispersionPhi);
+if dispersionPhi > 1
+    fprintf('-> phi > 1: Überdispersion vorhanden, Quasi-Poisson-Korrektur wird angewendet.\n');
+else
+    fprintf('-> phi <= 1: keine Überdispersion, Standard-Poisson-Ergebnisse bleiben gültig.\n');
+end
+
+beta         = mdl_poisson.Coefficients.Estimate;
+se_poisson   = mdl_poisson.Coefficients.SE;
+se_quasi     = se_poisson * sqrt(dispersionPhi);
+z_quasi = beta ./ se_quasi;
+p_quasi = 2 * (1 - normcdf(abs(z_quasi)));
+QuasiPoissonResults = table(mdl_poisson.Coefficients.Row, beta, se_quasi, z_quasi, p_quasi,'VariableNames', {'Coefficient','Estimate','SE_quasi','z_quasi','p_quasi'});
+disp(QuasiPoissonResults)
+
+slope_events      = beta(2);
+rateRatio_events  = exp(slope_events);
+pctChange_events  = (rateRatio_events - 1) * 100;
+fprintf('Trend Eventfrequenz (Quasi-Poisson): %.2f%% Veränderung pro Jahr (Rate Ratio = %.4f), p = %.4f\n',pctChange_events, rateRatio_events, p_quasi(2));
+
+figure("Name","Eventfrequency per Year - Quasi-Poisson-Trend at " + stationName);
+bar(yearList, n_events_per_year, "FaceColor",[1 0.75 0], "DisplayName","Events per Year");
+hold on
+plot(yearList, mu_hat, "r-", "LineWidth", 2, "DisplayName", sprintf("Quasi-Poisson-Trend: %.2f%%/Year, p=%.3f", pctChange_events, p_quasi(2)));
+grid off
+xlabel("Year"); ylabel("Number of Events");
+title("Eventfrequency per Year - Quasi-Poisson-Trend at " + stationName);
+legend("Location","northwest");
+exportgraphics(gcf, 'Eventfrequency per Year - Quasi-Poisson-Trend.png', 'Resolution', 300);
+
+%% 13.2.1 Beakpointanalysis: Eventfrequency (Quasi-Poisson je Phase)
+
+[bFreq, sseFreq] = findChangepointLinear(n_events_per_year, 3);
+breakYearFreq = yearList(bFreq);
+fprintf('Bruchpunkt (Eventfrequenz): %d\n', breakYearFreq);
+
+idxPhase1 = yearList <  breakYearFreq;
+idxPhase2 = yearList >= breakYearFreq;
+years_p1  = yearList(idxPhase1);
+years_p2  = yearList(idxPhase2);
+events_p1 = n_events_per_year(idxPhase1);
+events_p2 = n_events_per_year(idxPhase2);
+fprintf('Phase 1: n=%d Jahre, Phase 2: n=%d Jahre\n', numel(years_p1), numel(years_p2));
+
+if numel(years_p1) < 5 || numel(years_p2) < 5
+    warning('Mindestens eine Phase hat weniger als 5 Jahre - Poisson/Quasi-Poisson-Schätzung ist bei so wenig Datenpunkten instabil, Ergebnisse nur als Tendenz interpretieren.');
+end
+
+x_p1 = years_p1 - years_p1(1);
+x_p2 = years_p2 - years_p2(1);
+
+mdl_poisson_p1 = fitglm(x_p1, events_p1, 'Distribution','poisson');
+mu_hat_p1 = mdl_poisson_p1.Fitted.Response;
+pearsonResid_p1 = (events_p1 - mu_hat_p1) ./ sqrt(mu_hat_p1);
+phi_p1 = sum(pearsonResid_p1.^2) / mdl_poisson_p1.DFE;
+beta_p1     = mdl_poisson_p1.Coefficients.Estimate;
+se_quasi_p1 = mdl_poisson_p1.Coefficients.SE * sqrt(phi_p1);
+p_quasi_p1  = 2 * (1 - normcdf(abs(beta_p1 ./ se_quasi_p1)));
+rateRatio_p1 = exp(beta_p1(2));
+pctChange_p1 = (rateRatio_p1 - 1) * 100;
+fprintf('Phase 1 (vor %d): phi=%.2f, %.2f%% Veränderung/Jahr (Rate Ratio=%.4f), p=%.4f\n', ...
+    breakYearFreq, phi_p1, pctChange_p1, rateRatio_p1, p_quasi_p1(2));
+
+mdl_poisson_p2 = fitglm(x_p2, events_p2, 'Distribution','poisson');
+mu_hat_p2 = mdl_poisson_p2.Fitted.Response;
+pearsonResid_p2 = (events_p2 - mu_hat_p2) ./ sqrt(mu_hat_p2);
+phi_p2 = sum(pearsonResid_p2.^2) / mdl_poisson_p2.DFE;
+beta_p2     = mdl_poisson_p2.Coefficients.Estimate;
+se_quasi_p2 = mdl_poisson_p2.Coefficients.SE * sqrt(phi_p2);
+p_quasi_p2  = 2 * (1 - normcdf(abs(beta_p2 ./ se_quasi_p2)));
+rateRatio_p2 = exp(beta_p2(2));
+pctChange_p2 = (rateRatio_p2 - 1) * 100;
+fprintf('Phase 2 (ab %d): phi=%.2f, %.2f%% Veränderung/Jahr (Rate Ratio=%.4f), p=%.4f\n', ...
+    breakYearFreq, phi_p2, pctChange_p2, rateRatio_p2, p_quasi_p2(2));
+
+figure("Name","Eventfrequency with Breakpoint-Trend (Quasi-Poisson) at " + stationName);
+bar(yearList, n_events_per_year, "FaceColor",[1 0.75 0], "DisplayName","Events per Year");
+hold on
+plot(years_p1, mu_hat_p1, "b-", "LineWidth", 2,"DisplayName", sprintf("Phase 1: %.2f%%/Year, p=%.3f", pctChange_p1, p_quasi_p1(2)));
+plot(years_p2, mu_hat_p2, "r-", "LineWidth", 2, "DisplayName", sprintf("Phase 2: %.2f%%/Year, p=%.3f", pctChange_p2, p_quasi_p2(2)));
+xline(breakYearFreq, "--k", "HandleVisibility","off");
+grid off
+xlabel("Year"); ylabel("Number of Events");
+title("Eventfrequency with Breakpoint-Trend (Quasi-Poisson) at " + stationName);
+legend("Location","northwest");
+exportgraphics(gcf, 'Eventfrequency with Breakpoint-Trend (Quasi-Poisson).png', 'Resolution', 300);
+
+%% 13.3 Duration Analysis of Extremevents
+
+ev_duration = ev_end - ev_start + 1;
+
+fprintf('Anzahl Events: %d\n', length(ev_duration));
+fprintf('Mediane Dauer: %.1f Tage\n', median(ev_duration));
+fprintf('Mittlere Dauer: %.2f Tage\n', mean(ev_duration));
+fprintf('Maximale Dauer: %d Tage\n', max(ev_duration));
+
+%% 13.3.1 Event-Catalogue: all Events documented
+
+event_start_date = DOraw.time(ev_start);
+event_start_date.Format = 'dd.MM.yyyy';
+
+EventDurationCatalog = table(event_start_date, ev_year, ev_duration, ...
+    'VariableNames', {'Start Date','Year','Duration (days)'});
+EventDurationCatalog = sortrows(EventDurationCatalog, 'Duration (days)', 'descend');
+
+fprintf('=== Vollständiger Event-Katalog - %s (%d Events) ===\n', stationName, height(EventDurationCatalog));
+disp(EventDurationCatalog);
+
+writetable(EventDurationCatalog, "Event Duration Catalog " + stationName + ".csv", "Delimiter",";");
+
+%% 13.3.2 Mediane and max. Eventduration per Year pro 
+
+median_duration_per_year = NaN(nYears,1);
+max_duration_per_year    = NaN(nYears,1);
+
+for k = 1:nYears
+    durations_this_year = ev_duration(ev_year == yearList(k));
+    if ~isempty(durations_this_year)
+        median_duration_per_year(k) = median(durations_this_year);
+        max_duration_per_year(k)    = max(durations_this_year);
+    end
+end
+
+%% 13.3.3 Trend: mediane Eventduration per Year 
+
+validDuration          = ~isnan(median_duration_per_year);
+yearList_valid          = yearList(validDuration);
+median_duration_valid   = median_duration_per_year(validDuration);
+
+[~, tau_dur, p_dur, sig_dur] = mannKendall(median_duration_valid);
+slope_dur = sensSlope(median_duration_valid);
+fprintf('Trend mediane Eventdauer: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f Tage/Jahr\n', ...
+    tau_dur, p_dur, sig_dur, slope_dur);
+
+figure("Name","Median Event Duration per Year at " + stationName);
+bar(yearList, median_duration_per_year, "FaceColor",[0.3 0.6 0.3], "DisplayName","Median Event Duration");
+hold on
+b_dur = median(median_duration_valid) - slope_dur*median(yearList_valid);
+plot(yearList_valid, slope_dur*yearList_valid + b_dur, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Sen-Slope = %.3f Days/Year, p = %.3f", slope_dur, p_dur));
+
+for k = 1:nYears
+    if ~isnan(median_duration_per_year(k))
+        text(yearList(k), median_duration_per_year(k) + 0.5, ...
+            sprintf('%d', max_duration_per_year(k)), ...
+            "HorizontalAlignment","center", "FontSize",7, "Color",[0.2 0.2 0.2]);
+    end
+end
+text(0.02, 0.95, "Numbers = longest Event per Year [Days]", ...
+    "Units","normalized", "FontSize",8, "BackgroundColor","white");
+
+grid off
+xlabel("Year"); ylabel("Median Event Duration [days]");
+title("Median Event Duration per Year at " + stationName);
+legend("Location","best");
+exportgraphics(gcf, 'Median Event Duration per Year.png', 'Resolution', 300);
+
+%% 13.3.4 Breakpoint Analysis: mediane Eventduration per Year 
+
+[bDur, sseDur] = findChangepointLinear(median_duration_valid, 3);
+breakYearDur = yearList_valid(bDur);
+fprintf('Bruchpunkt (mediane Eventdauer): %d\n', breakYearDur);
+
+phaseDur1 = median_duration_valid(yearList_valid <  breakYearDur);
+phaseDur2 = median_duration_valid(yearList_valid >= breakYearDur);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseDur1), numel(phaseDur2));
+
+[~, tauDur1, pDur1, sigDur1] = mannKendall(phaseDur1); slopeDur1 = sensSlope(phaseDur1);
+[~, tauDur2, pDur2, sigDur2] = mannKendall(phaseDur2); slopeDur2 = sensSlope(phaseDur2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f Tage/Jahr\n', breakYearDur, tauDur1,pDur1,sigDur1,slopeDur1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f Tage/Jahr\n', breakYearDur, tauDur2,pDur2,sigDur2,slopeDur2);
+
+n1 = numel(phaseDur1); xbar1 = mean(phaseDur1);
+r1_dur1 = sum((phaseDur1(1:end-1)-xbar1).*(phaseDur1(2:end)-xbar1)) / sum((phaseDur1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_dur1, 1.96/sqrt(n1));
+
+n2 = numel(phaseDur2); xbar2 = mean(phaseDur2);
+r1_dur2 = sum((phaseDur2(1:end-1)-xbar2).*(phaseDur2(2:end)-xbar2)) / sum((phaseDur2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_dur2, 1.96/sqrt(n2));
+
+[~, ~, pDur1c, sigDur1c, neffDur1] = mannKendallCorrected(phaseDur1, r1_dur1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pDur1c, sigDur1c, neffDur1, numel(phaseDur1));
+
+[~, ~, pDur2c, sigDur2c, neffDur2] = mannKendallCorrected(phaseDur2, r1_dur2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pDur2c, sigDur2c, neffDur2, numel(phaseDur2));
+
+t1 = yearList_valid(yearList_valid <  breakYearDur);
+t2 = yearList_valid(yearList_valid >= breakYearDur);
+
+figure("Name","Median Event Duration per Year with Breakpoint-Trend at " + stationName);
+bar(yearList, median_duration_per_year, "FaceColor",[0.3 0.6 0.3], "DisplayName","Median Event Duration");
+hold on
+
+b1 = median(phaseDur1) - slopeDur1*median(t1);
+plot(t1, slopeDur1*t1 + b1, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 1: Sen=%.3f Days/Year, p=%.3f", slopeDur1, pDur1));
+
+b2 = median(phaseDur2) - slopeDur2*median(t2);
+plot(t2, slopeDur2*t2 + b2, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 2: Sen=%.3f Days/Year, p=%.3f", slopeDur2, pDur2));
+
+xline(breakYearDur, ":k", "HandleVisibility","off");
+
+for k = 1:nYears
+    if ~isnan(median_duration_per_year(k))
+        text(yearList(k), median_duration_per_year(k) + 0.5, ...
+            sprintf('%d', max_duration_per_year(k)), ...
+            "HorizontalAlignment","center", "FontSize",7, "Color",[0.2 0.2 0.2]);
+    end
+end
+text(0.02, 0.95, "Numbers = longest Event per Year [Days]", ...
+    "Units","normalized", "FontSize",8, "BackgroundColor","white");
+
+grid off
+xlabel("Year"); ylabel("Median Event Duration [days]");
+title("Median Event Duration per Year with Breakpoint-Trend at " + stationName);
+legend("Location","best");
+exportgraphics(gcf, 'Median Event Duration per Year with Breakpoint-Trend.png', 'Resolution', 300);
+
+%% 13.4 Intensity Analysis of Extremevents (cumulative Difference per Event)
+
+nEventsTotal = length(ev_start);
+
+cumIntensity_p10only = NaN(nEventsTotal,1);
+cumIntensity_hyp     = NaN(nEventsTotal,1);
+cumIntensity_anx     = NaN(nEventsTotal,1);
+
+for i = 1:nEventsTotal
+    idx_event   = ev_start(i):ev_end(i);
+    cat_event   = category(idx_event);
+    deficit_day = max(0, p10_threshold(idx_event) - DOraw.value(idx_event));
+
+    cumIntensity_p10only(i) = sum(deficit_day(cat_event == 1));
+    cumIntensity_hyp(i)     = sum(deficit_day(cat_event == 2));
+    cumIntensity_anx(i)     = sum(deficit_day(cat_event == 3));
+end
+
+event_start_dates = DOraw.time(ev_start);
+
+%% 13.4.1 Plot Stacked Bar Chart
+
+yearsForTicks = year(DOraw.time(1)) : 5 : year(DOraw.time(end));
+xTickDates    = datetime(yearsForTicks, 1, 1);
+
+intensityData   = [cumIntensity_p10only, cumIntensity_hyp, cumIntensity_anx];
+intensityColors = [0.7 0.8 1;   
+                     1   0   1;  
+                     1   0   0];  
+
+figure("Name","Cumulative Event Intensity (Stacked) at " + stationName);
+b = bar(event_start_dates, intensityData, "stacked","BarWidth",4);
+for c = 1:numel(b)
+    b(c).FaceColor = intensityColors(c,:);
+end
+b(1).DisplayName = "Below P10";
+b(2).DisplayName = "Hypoxic";
+b(3).DisplayName = "sevHypoxic";
+
+grid off
+xticks(xTickDates);
+xticklabels(string(yearsForTicks));
+xlabel("Year"); ylabel("Cumulative Deficit vs. P10 [mg/L]");
+title("Cumulative Event Intensity by Category - " + stationName);
+legend("Location","northwest");
+exportgraphics(gcf, 'Cumulative Event Intensity (Stacked).png', 'Resolution', 300);
+
+%% 13.4.2 Duration-normalized Intensity per Event: Mean & Maximum Intensity
+
+cumIntensity_total = cumIntensity_p10only + cumIntensity_hyp + cumIntensity_anx;
+
+mean_intensity = cumIntensity_total ./ ev_duration;
+
+max_intensity   = NaN(nEventsTotal,1);
+min_DO_in_event = NaN(nEventsTotal,1);  
+
+for i = 1:nEventsTotal
+    idx_event   = ev_start(i):ev_end(i);
+    deficit_day = max(0, p10_threshold(idx_event) - DOraw.value(idx_event));
+    max_intensity(i)   = max(deficit_day);
+    min_DO_in_event(i) = min(DOraw.value(idx_event));
+end
+
+fprintf('Mean Intensity - Median: %.3f mg/L, Mean: %.3f mg/L\n', median(mean_intensity), mean(mean_intensity));
+fprintf('Max Intensity  - Median: %.3f mg/L, Mean: %.3f mg/L\n', median(max_intensity), mean(max_intensity));
+
+%% 13.4.2a Mean & Maximum Intensity per Year (Median)
+
+median_meanIntensity_per_year = NaN(nYears,1);
+median_maxIntensity_per_year  = NaN(nYears,1);
+
+for k = 1:nYears
+    idx_events_this_year = ev_year == yearList(k);
+    if any(idx_events_this_year)
+        median_meanIntensity_per_year(k) = median(mean_intensity(idx_events_this_year));
+        median_maxIntensity_per_year(k)  = median(max_intensity(idx_events_this_year));
+    end
+end
+
+%% 13.4.2b Trend: Mean Intensity per Year 
+
+validMeanInt = ~isnan(median_meanIntensity_per_year);
+yearList_validMeanInt = yearList(validMeanInt);
+median_meanIntensity_valid = median_meanIntensity_per_year(validMeanInt);
+
+[~, tau_meanInt, p_meanInt, sig_meanInt] = mannKendall(median_meanIntensity_valid);
+slope_meanInt = sensSlope(median_meanIntensity_valid);
+fprintf('Trend Mean Intensity: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', ...
+    tau_meanInt, p_meanInt, sig_meanInt, slope_meanInt);
+
+%% 13.4.2c Plot: Mean Intensity per Year
+
+figure("Name","Median Mean Event Intensity per Year at " + stationName);
+bar(yearList, median_meanIntensity_per_year, "FaceColor",[0.5 0.3 0.7], "DisplayName","Median Mean Intensity");
+hold on
+b_meanInt = median(median_meanIntensity_valid) - slope_meanInt*median(yearList_validMeanInt);
+plot(yearList_validMeanInt, slope_meanInt*yearList_validMeanInt + b_meanInt, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Sen-Slope = %.4f mg/L/Year, p = %.3f", slope_meanInt, p_meanInt));
+grid off
+xlabel("Year"); ylabel("Median Mean Intensity [mg/L below P10]");
+title("Median Mean Event Intensity per Year at " + stationName);
+legend("Location","north");
+exportgraphics(gcf, 'Median Mean Event Intensity per Year.png', 'Resolution', 300);
+
+%% 13.4.2d Breakpoint Analysis: Mean Intensity per Year
+
+[bMeanInt, sseMeanInt] = findChangepointLinear(median_meanIntensity_valid, 3);
+breakYearMeanInt = yearList_validMeanInt(bMeanInt);
+fprintf('Bruchpunkt (Mean Intensity): %d\n', breakYearMeanInt);
+
+phaseMeanInt1 = median_meanIntensity_valid(yearList_validMeanInt <  breakYearMeanInt);
+phaseMeanInt2 = median_meanIntensity_valid(yearList_validMeanInt >= breakYearMeanInt);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseMeanInt1), numel(phaseMeanInt2));
+
+[~, tauMeanInt1, pMeanInt1, sigMeanInt1] = mannKendall(phaseMeanInt1); slopeMeanInt1 = sensSlope(phaseMeanInt1);
+[~, tauMeanInt2, pMeanInt2, sigMeanInt2] = mannKendall(phaseMeanInt2); slopeMeanInt2 = sensSlope(phaseMeanInt2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', breakYearMeanInt, tauMeanInt1,pMeanInt1,sigMeanInt1,slopeMeanInt1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', breakYearMeanInt, tauMeanInt2,pMeanInt2,sigMeanInt2,slopeMeanInt2);
+
+n1 = numel(phaseMeanInt1); xbar1 = mean(phaseMeanInt1);
+r1_meanInt1 = sum((phaseMeanInt1(1:end-1)-xbar1).*(phaseMeanInt1(2:end)-xbar1)) / sum((phaseMeanInt1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_meanInt1, 1.96/sqrt(n1));
+
+n2 = numel(phaseMeanInt2); xbar2 = mean(phaseMeanInt2);
+r1_meanInt2 = sum((phaseMeanInt2(1:end-1)-xbar2).*(phaseMeanInt2(2:end)-xbar2)) / sum((phaseMeanInt2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_meanInt2, 1.96/sqrt(n2));
+
+[~, ~, pMeanInt1c, sigMeanInt1c, neffMeanInt1] = mannKendallCorrected(phaseMeanInt1, r1_meanInt1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pMeanInt1c, sigMeanInt1c, neffMeanInt1, numel(phaseMeanInt1));
+
+[~, ~, pMeanInt2c, sigMeanInt2c, neffMeanInt2] = mannKendallCorrected(phaseMeanInt2, r1_meanInt2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pMeanInt2c, sigMeanInt2c, neffMeanInt2, numel(phaseMeanInt2));
+
+%% 13.4.2e Plot: Mean Intensity per Year with Breakpoint 
+
+t1 = yearList_validMeanInt(yearList_validMeanInt <  breakYearMeanInt);
+t2 = yearList_validMeanInt(yearList_validMeanInt >= breakYearMeanInt);
+
+figure("Name","Median Mean Event Intensity per Year with Breakpoint-Trend at " + stationName);
+bar(yearList, median_meanIntensity_per_year, "FaceColor",[0.5 0.3 0.7], "DisplayName","Median Mean Intensity");
+hold on
+
+b1 = median(phaseMeanInt1) - slopeMeanInt1*median(t1);
+plot(t1, slopeMeanInt1*t1 + b1, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 1: Sen=%.4f mg/L/Year, p=%.3f", slopeMeanInt1, pMeanInt1));
+
+b2 = median(phaseMeanInt2) - slopeMeanInt2*median(t2);
+plot(t2, slopeMeanInt2*t2 + b2, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 2: Sen=%.4f mg/L/Year, p=%.3f", slopeMeanInt2, pMeanInt2));
+
+xline(breakYearMeanInt, ":k", "HandleVisibility","off");
+
+grid off
+xlabel("Year"); ylabel("Median Mean Intensity [mg/L below P10]");
+title("Median Mean Event Intensity per Year with Breakpoint-Trend at " + stationName);
+legend("Location","north");
+exportgraphics(gcf, 'Median Mean Event Intensity per Year with Breakpoint-Trend.png', 'Resolution', 300);
+
+%% 13.4.2f Trend: Maximum Intensity per Year
+
+validMaxInt = ~isnan(median_maxIntensity_per_year);
+yearList_validMaxInt = yearList(validMaxInt);
+median_maxIntensity_valid = median_maxIntensity_per_year(validMaxInt);
+
+[~, tau_maxInt, p_maxInt, sig_maxInt] = mannKendall(median_maxIntensity_valid);
+slope_maxInt = sensSlope(median_maxIntensity_valid);
+fprintf('Trend Maximum Intensity: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', ...
+    tau_maxInt, p_maxInt, sig_maxInt, slope_maxInt);
+
+%% 13.4.2g Plot: Maximum Intensity per Year
+
+figure("Name","Median Maximum Event Intensity per Year at " + stationName);
+bar(yearList, median_maxIntensity_per_year, "FaceColor",[0.8 0.4 0.1], "DisplayName","Median Maximum Intensity");
+hold on
+b_maxInt = median(median_maxIntensity_valid) - slope_maxInt*median(yearList_validMaxInt);
+plot(yearList_validMaxInt, slope_maxInt*yearList_validMaxInt + b_maxInt, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Sen-Slope = %.4f mg/L/Year, p = %.3f", slope_maxInt, p_maxInt));
+grid off
+xlabel("Year"); ylabel("Median Maximum Intensity [mg/L below P10]");
+title("Median Maximum Event Intensity per Year at " + stationName);
+legend("Location","northwest");
+exportgraphics(gcf, 'Median Maximum Event Intensity per Year.png', 'Resolution', 300);
+
+%% 13.4.2h Breakpoint Analysis: Maximum Intensity per Year
+
+[bMaxInt, sseMaxInt] = findChangepointLinear(median_maxIntensity_valid, 3);
+breakYearMaxInt = yearList_validMaxInt(bMaxInt);
+fprintf('Bruchpunkt (Maximum Intensity): %d\n', breakYearMaxInt);
+
+phaseMaxInt1 = median_maxIntensity_valid(yearList_validMaxInt <  breakYearMaxInt);
+phaseMaxInt2 = median_maxIntensity_valid(yearList_validMaxInt >= breakYearMaxInt);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseMaxInt1), numel(phaseMaxInt2));
+
+[~, tauMaxInt1, pMaxInt1, sigMaxInt1] = mannKendall(phaseMaxInt1); slopeMaxInt1 = sensSlope(phaseMaxInt1);
+[~, tauMaxInt2, pMaxInt2, sigMaxInt2] = mannKendall(phaseMaxInt2); slopeMaxInt2 = sensSlope(phaseMaxInt2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', breakYearMaxInt, tauMaxInt1,pMaxInt1,sigMaxInt1,slopeMaxInt1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f mg/L/Jahr\n', breakYearMaxInt, tauMaxInt2,pMaxInt2,sigMaxInt2,slopeMaxInt2);
+
+n1 = numel(phaseMaxInt1); xbar1 = mean(phaseMaxInt1);
+r1_maxInt1 = sum((phaseMaxInt1(1:end-1)-xbar1).*(phaseMaxInt1(2:end)-xbar1)) / sum((phaseMaxInt1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_maxInt1, 1.96/sqrt(n1));
+
+n2 = numel(phaseMaxInt2); xbar2 = mean(phaseMaxInt2);
+r1_maxInt2 = sum((phaseMaxInt2(1:end-1)-xbar2).*(phaseMaxInt2(2:end)-xbar2)) / sum((phaseMaxInt2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_maxInt2, 1.96/sqrt(n2));
+
+[~, ~, pMaxInt1c, sigMaxInt1c, neffMaxInt1] = mannKendallCorrected(phaseMaxInt1, r1_maxInt1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pMaxInt1c, sigMaxInt1c, neffMaxInt1, numel(phaseMaxInt1));
+
+[~, ~, pMaxInt2c, sigMaxInt2c, neffMaxInt2] = mannKendallCorrected(phaseMaxInt2, r1_maxInt2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pMaxInt2c, sigMaxInt2c, neffMaxInt2, numel(phaseMaxInt2));
+
+%% 13.4.2i Plot: Maximum Intensity per Year with Breakpoint 
+
+t1 = yearList_validMaxInt(yearList_validMaxInt <  breakYearMaxInt);
+t2 = yearList_validMaxInt(yearList_validMaxInt >= breakYearMaxInt);
+
+figure("Name","Median Maximum Event Intensity per Year with Breakpoint-Trend at " + stationName);
+bar(yearList, median_maxIntensity_per_year, "FaceColor",[0.8 0.4 0.1], "DisplayName","Median Maximum Intensity");
+hold on
+
+b1 = median(phaseMaxInt1) - slopeMaxInt1*median(t1);
+plot(t1, slopeMaxInt1*t1 + b1, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 1: Sen=%.4f mg/L/Year, p=%.3f", slopeMaxInt1, pMaxInt1));
+
+b2 = median(phaseMaxInt2) - slopeMaxInt2*median(t2);
+plot(t2, slopeMaxInt2*t2 + b2, "k-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 2: Sen=%.4f mg/L/Year, p=%.3f", slopeMaxInt2, pMaxInt2));
+
+xline(breakYearMaxInt, ":k", "HandleVisibility","off");
+
+grid off
+xlabel("Year"); ylabel("Median Maximum Intensity [mg/L below P10]");
+title("Median Maximum Event Intensity per Year with Breakpoint-Trend at " + stationName);
+legend("Location","northwest");
+exportgraphics(gcf, 'Median Maximum Event Intensity per Year with Breakpoint-Trend.png', 'Resolution', 300);
+
+%% 14. Event-Catalogue: Characteristics per Event
+
+nEventsTotal = length(ev_start);
+
+n_hypoxic_days_event = NaN(nEventsTotal,1);
+n_sevHypoxic_days_event  = NaN(nEventsTotal,1);
+n_bridge_days_event  = NaN(nEventsTotal,1);
+min_DO_event = NaN(nEventsTotal,1);
+max_DO_event = NaN(nEventsTotal,1);
+
+for i = 1:nEventsTotal
+    idx_event = ev_start(i):ev_end(i);
+    n_hypoxic_days_event(i) = sum(is_hypoxic(idx_event));
+    n_sevHypoxic_days_event(i)  = sum(is_sevHypoxic(idx_event));
+    n_bridge_days_event(i)  = sum(category(idx_event) == 4);
+    min_DO_event(i) = min(DOraw.value(idx_event));
+    max_DO_event(i) = max(DOraw.value(idx_event));
+end
+
+range_DO_event = max_DO_event - min_DO_event;
+
+event_start_date = DOraw.time(ev_start);
+event_end_date   = DOraw.time(ev_end);
+
+EventCatalogFull = table(event_start_date, event_end_date, ev_duration, ...
+    n_hypoxic_days_event, n_sevHypoxic_days_event, n_bridge_days_event, ...
+    min_DO_event, max_DO_event, range_DO_event, ...
+    'VariableNames', {'Start Date','End Date','Total Days', ...
+    'Days below 4 mg/L','Days below 2 mg/L','Bridge Days', ...
+    'Min DO (mg/L)','Max DO (mg/L)','DO Range (mg/L)'});
+
+EventCatalogFull = sortrows(EventCatalogFull, 'Start Date');
+
+EventCatalogFull.("Start Date") = string(EventCatalogFull.("Start Date"), "dd.MM.yyyy");
+EventCatalogFull.("End Date")   = string(EventCatalogFull.("End Date"), "dd.MM.yyyy");
+
+fprintf('=== Event-Katalog - %s (%d Events) ===\n', stationName, height(EventCatalogFull));
+disp(EventCatalogFull);
+
+writetable(EventCatalogFull, "Event Catalog " + stationName + ".xlsx");
+
+%% 15 Catalogue: P10-Threshold
+
+nDoy = length(climP10);
+refYear = 2024;   
+doy_calendar_date = datetime(refYear,1,1) + days((1:nDoy)' - 1);
+
+P10ThresholdCatalog = table((1:nDoy)', doy_calendar_date, climP10, ...
+    'VariableNames', {'Day of Year','Calendar Date','P10 Threshold (mg/L)'});
+
+P10ThresholdCatalog.("Calendar Date") = string(P10ThresholdCatalog.("Calendar Date"), "dd.MM.");
+
+fprintf('=== P10-Schwellenwert-Katalog - %s (%d Tage) ===\n', stationName, height(P10ThresholdCatalog));
+disp(P10ThresholdCatalog);
+
+writetable(P10ThresholdCatalog, "P10 Threshold Catalog " + stationName + ".xlsx");
+
+
+%% ======================================================================
+%
+%  FROM HERE ON, THE EXTREME EVENT ANALYSIS IS COMPLETE
+%
+%   NOW CONTINUING WITH THE DRIVER ANALYSIS
+%
+% =======================================================================
+%% Driver-Data: Water Temperature 
+
+Tempraw = readtable("Bunthaus Water Temp.csv","NumHeaderLines",5,"ReadVariableNames",true,"DecimalSeparator",",","Delimiter",";");
+Tempraw = renamevars(Tempraw,["Zeitstempel","Wert"],["time","value"]);
+if width(Tempraw) > 2
+    Tempraw = Tempraw(:,{'time','value'});  
+end
+
+Tempraw = table2timetable(Tempraw, 'RowTimes','time');
+Tempraw = retime(Tempraw, 'regular', 'fillwithmissing', 'TimeStep', days(1));
+Tempraw = timetable2table(Tempraw, 'ConvertRowTimes', true);
+
+Tempraw.flag = repmat("measurement", height(Tempraw), 1);
+Tempraw.wasMissingOriginal = isnan(Tempraw.value);
+Tempraw.flag(Tempraw.wasMissingOriginal) = "missing_value";
+Tempraw.wasOutlier = false(height(Tempraw),1);
+
+fprintf('Wassertemperatur - Zeitraum: %s bis %s, Zeilen: %d\n', ...
+    datestr(min(Tempraw.time)), datestr(max(Tempraw.time)), height(Tempraw));
+
+dailyJump = diff(Tempraw.value);
+
+figure('Name','Verteilung der Tag-zu-Tag-Sprünge - Wassertemperatur');
+histogram(dailyJump, 'BinWidth', 0.5);
+xlabel('Temperature Change [°C] per Day'); ylabel('Frequency'); grid off
+exportgraphics(gcf, 'Verteilung der Tag-zu-Tag-Sprünge - Wassertemperatur.png', 'Resolution', 300);
+
+sdJump = std(dailyJump, 'omitnan');
+threshold_provisional = 5 * sdJump;   % ADJUST ACCORDINGLY
+fprintf('Vorläufiger Rate-of-Change-Schwellenwert Temperatur (5xSD): %.2f °C/Tag\n', threshold_provisional);
+
+jumpThreshold_Temp = threshold_provisional;  
+
+diffPrev = [NaN; diff(Tempraw.value)];
+diffNext = [diff(Tempraw.value); NaN];
+isSpike = abs(diffPrev) > jumpThreshold_Temp & abs(diffNext) > jumpThreshold_Temp;
+
+fprintf('Als isolierter Spike markiert (Temperatur): %d Punkte\n', sum(isSpike));
+
+Tempraw.value(isSpike) = NaN;
+Tempraw.wasOutlier(isSpike) = true;
+Tempraw.flag(isSpike) = "outlier_rateofchange";
+
+% Interpolation
+
+nanBefore = isnan(Tempraw.value);
+Tempraw.value = fillmissing(Tempraw.value, 'linear', 'MaxGap',3);
+Tempraw.flag(nanBefore & ~isnan(Tempraw.value)) = "linear_interpoliert";
+
+nanBefore = isnan(Tempraw.value);
+Tempraw.value = fillmissing(Tempraw.value, 'spline', 'MaxGap', 6);
+Tempraw.flag(nanBefore & ~isnan(Tempraw.value)) = "spline_interpoliert";
+
+doy = day(Tempraw.time, 'dayofyear');
+validIdx = ~isnan(Tempraw.value);
+[G, doyList] = findgroups(doy(validIdx));
+climMean = splitapply(@mean, Tempraw.value(validIdx), G);
+climLookup = nan(366,1);
+climLookup(doyList) = climMean;
+
+missingIdx = isnan(Tempraw.value);
+Tempraw.value(missingIdx) = climLookup(doy(missingIdx));
+Tempraw.flag(missingIdx) = "klimatologisch_gefuellt";
+
+assert(sum(isnan(Tempraw.value)) == 0, "Es sind noch NaN in Tempraw.value vorhanden.");
+summary(categorical(Tempraw.flag))
+
+%% Driver-Data: Water Temperature - Seasonality (STL)
+
+TT_Temp = table2timetable(Tempraw(:,["time","value"]));
+[longtermTrend_Temp, seasonalTrend_Temp, residual_Temp] = trenddecomp(TT_Temp.value, 'stl', 365);
+
+figure("Name", "STL Decomposition - Wassertemperatur");
+subplot(4,1,1), plot(TT_Temp.time, TT_Temp.value), title('Original H20-Temp Data'), grid off;
+subplot(4,1,2), plot(TT_Temp.time, longtermTrend_Temp), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT_Temp.time, seasonalTrend_Temp), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT_Temp.time, residual_Temp), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition - Wassertemperatur.png', 'Resolution', 300);
+
+Fs_Temp = max(0, 1 - var(residual_Temp,'omitnan') / var(seasonalTrend_Temp + residual_Temp, 'omitnan'));
+fprintf('Saisonalitätsstärke Wassertemperatur (Fs): %.3f\n', Fs_Temp);
+
+%% Driver-Data: Water Temperature - Trend Seasonal Amplitude
+
+years_Temp = year(TT_Temp.time);
+[G_Temp, yearList_Temp] = findgroups(years_Temp);
+
+annualSeasonalRange_Temp = splitapply(@(x) max(x)-min(x), seasonalTrend_Temp, G_Temp);
+annualSeasonalStd_Temp   = splitapply(@std, seasonalTrend_Temp, G_Temp);
+daysPerYear_Temp         = splitapply(@numel, seasonalTrend_Temp, G_Temp);
+
+validYr_Temp = daysPerYear_Temp >= 350;  
+
+figure('Name','Annual Seasonal Amplitude (STL) - Wassertemperatur');
+subplot(2,1,1)
+plot(yearList_Temp, annualSeasonalRange_Temp, '-o'); xlabel('Year'); ylabel('Range [°C]');
+title('Annual range of the seasonal component - Watertemperature'); grid off
+subplot(2,1,2)
+plot(yearList_Temp, annualSeasonalStd_Temp, '-o'); xlabel('Year'); ylabel('Std [°C]');
+title('Annual standard deviation of the seasonal component - Watertemperature'); grid off
+exportgraphics(gcf, 'Annual Seasonal Amplitude (STL) - Wassertemperatur.png', 'Resolution', 300);
+
+[~, tau_r_Temp, p_r_Temp, sig_r_Temp] = mannKendall(annualSeasonalRange_Temp(validYr_Temp));
+slope_r_Temp = sensSlope(annualSeasonalRange_Temp(validYr_Temp));
+fprintf('Temp Spannweite: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', tau_r_Temp, p_r_Temp, sig_r_Temp, slope_r_Temp);
+
+[~, tau_s_Temp, p_s_Temp, sig_s_Temp] = mannKendall(annualSeasonalStd_Temp(validYr_Temp));
+slope_s_Temp = sensSlope(annualSeasonalStd_Temp(validYr_Temp));
+fprintf('Temp Std-Abw.:   tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', tau_s_Temp, p_s_Temp, sig_s_Temp, slope_s_Temp);
+
+x_r_Temp = annualSeasonalRange_Temp(validYr_Temp); n_r_Temp = numel(x_r_Temp); xbar_r_Temp = mean(x_r_Temp);
+r1_r_Temp = sum((x_r_Temp(1:end-1)-xbar_r_Temp).*(x_r_Temp(2:end)-xbar_r_Temp)) / sum((x_r_Temp-xbar_r_Temp).^2);
+fprintf('Temp Spannweite r1 = %.3f (Grenze ±%.3f)\n', r1_r_Temp, 1.96/sqrt(n_r_Temp));
+[~, ~, p_r_Temp_c, sig_r_Temp_c, neff_r_Temp] = mannKendallCorrected(x_r_Temp, r1_r_Temp);
+fprintf('Temp Spannweite korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_r_Temp_c, sig_r_Temp_c, neff_r_Temp, n_r_Temp);
+
+x_s_Temp = annualSeasonalStd_Temp(validYr_Temp); n_s_Temp = numel(x_s_Temp); xbar_s_Temp = mean(x_s_Temp);
+r1_s_Temp = sum((x_s_Temp(1:end-1)-xbar_s_Temp).*(x_s_Temp(2:end)-xbar_s_Temp)) / sum((x_s_Temp-xbar_s_Temp).^2);
+fprintf('Temp Std-Abw. r1 = %.3f (Grenze ±%.3f)\n', r1_s_Temp, 1.96/sqrt(n_s_Temp));
+[~, ~, p_s_Temp_c, sig_s_Temp_c, neff_s_Temp] = mannKendallCorrected(x_s_Temp, r1_s_Temp);
+fprintf('Temp Std-Abw. korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_s_Temp_c, sig_s_Temp_c, neff_s_Temp, n_s_Temp);
+
+%% Driver-Daten: Water Temperature - Day-of-Year-Climatology & Anomaly 
+
+doy_Temp = day(Tempraw.time, 'dayofyear');
+[G_doy_Temp, doyList_Temp] = findgroups(doy_Temp);
+clim_doy_Temp = splitapply(@(x) mean(x,'omitnan'), Tempraw.value, G_doy_Temp);
+
+climLookup_Temp = nan(366,1);
+climLookup_Temp(doyList_Temp) = clim_doy_Temp;
+
+Tempraw.anomaly = Tempraw.value - climLookup_Temp(doy_Temp);
+
+%% Driver-Data: Conductivity 
+% (µS/cm)
+
+Condraw = readtable("Bunthaus Sal .csv","NumHeaderLines",0,"ReadVariableNames",true,"DecimalSeparator",",","Delimiter",";");
+Condraw = renamevars(Condraw,["timestamp","value"],["time","value"]);
+
+Condraw = table2timetable(Condraw, 'RowTimes','time');
+Condraw = retime(Condraw, 'regular', 'fillwithmissing', 'TimeStep', days(1));
+Condraw = timetable2table(Condraw, 'ConvertRowTimes', true);
+
+Condraw.flag = repmat("measurement", height(Condraw), 1);
+Condraw.wasMissingOriginal = isnan(Condraw.value);
+Condraw.flag(Condraw.wasMissingOriginal) = "missing_value";
+Condraw.wasOutlier = false(height(Condraw),1);
+
+fprintf('Conductivity - Zeitraum: %s bis %s, Zeilen: %d\n', ...
+    datestr(min(Condraw.time)), datestr(max(Condraw.time)), height(Condraw));
+
+% Driver-Daten: Conductivity (Rate-of-Change)
+
+dailyJump = diff(Condraw.value);
+
+figure('Name','Verteilung der Tag-zu-Tag-Sprünge - Conductivity');
+histogram(dailyJump, 'BinWidth', 10);
+xlabel('Conductivity Change [µS/cm] per Day'); ylabel('Frequency'); grid off
+exportgraphics(gcf, 'Verteilung der Tag-zu-Tag-Sprünge - Conductivity.png', 'Resolution', 300);
+
+sdJump = std(dailyJump, 'omitnan');
+threshold_provisional = 8 * sdJump; % ADJUST ACCORDINGLY
+fprintf('Vorläufiger Rate-of-Change-Schwellenwert Conductivity (8xSD): %.2f µS/cm/Tag\n', threshold_provisional);
+
+jumpThreshold_Cond = threshold_provisional;  
+
+diffPrev = [NaN; diff(Condraw.value)];
+diffNext = [diff(Condraw.value); NaN];
+isSpike = abs(diffPrev) > jumpThreshold_Cond & abs(diffNext) > jumpThreshold_Cond;
+
+fprintf('Als isolierter Spike markiert (Conductivity): %d Punkte\n', sum(isSpike));
+
+Condraw.value(isSpike) = NaN;
+Condraw.wasOutlier(isSpike) = true;
+Condraw.flag(isSpike) = "outlier_rateofchange";
+
+% Driver-Data: Conductivity - Interpolation
+
+nanBefore = isnan(Condraw.value);
+Condraw.value = fillmissing(Condraw.value, 'linear', 'MaxGap',3);
+Condraw.flag(nanBefore & ~isnan(Condraw.value)) = "linear_interpoliert";
+
+nanBefore = isnan(Condraw.value);
+Condraw.value = fillmissing(Condraw.value, 'spline', 'MaxGap', 6);
+Condraw.flag(nanBefore & ~isnan(Condraw.value)) = "spline_interpoliert";
+
+doy = day(Condraw.time, 'dayofyear');
+validIdx = ~isnan(Condraw.value);
+[G, doyList] = findgroups(doy(validIdx));
+climMean = splitapply(@mean, Condraw.value(validIdx), G);
+climLookup = nan(366,1);
+climLookup(doyList) = climMean;
+
+missingIdx = isnan(Condraw.value);
+Condraw.value(missingIdx) = climLookup(doy(missingIdx));
+Condraw.flag(missingIdx) = "klimatologisch_gefuellt";
+
+assert(sum(isnan(Condraw.value)) == 0, "Es sind noch NaN in Condraw.value vorhanden.");
+summary(categorical(Condraw.flag))
+
+%% Driver-Data: Conductivity - Seasonality (STL)
+
+TT_Cond = table2timetable(Condraw(:,["time","value"]));
+[longtermTrend_Cond, seasonalTrend_Cond, residual_Cond] = trenddecomp(TT_Cond.value, 'stl', 365);
+
+figure("Name", "STL Decomposition - Conductivity");
+subplot(4,1,1), plot(TT_Cond.time, TT_Cond.value), title('Original Conductivity Data'), grid off;
+subplot(4,1,2), plot(TT_Cond.time, longtermTrend_Cond), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT_Cond.time, seasonalTrend_Cond), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT_Cond.time, residual_Cond), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition - Conductivity.png', 'Resolution', 300);
+
+Fs_Cond = max(0, 1 - var(residual_Cond,'omitnan') / var(seasonalTrend_Cond + residual_Cond, 'omitnan'));
+fprintf('Saisonalitätsstärke Conductivity (Fs): %.3f\n', Fs_Cond);
+
+%% Driver-Data: Conductivity - Trend of Seasonal Amplitude 
+
+years_Cond = year(TT_Cond.time);
+[G_Cond, yearList_Cond] = findgroups(years_Cond);
+
+annualSeasonalRange_Cond = splitapply(@(x) max(x)-min(x), seasonalTrend_Cond, G_Cond);
+annualSeasonalStd_Cond   = splitapply(@std, seasonalTrend_Cond, G_Cond);
+daysPerYear_Cond         = splitapply(@numel, seasonalTrend_Cond, G_Cond);
+
+validYr_Cond = daysPerYear_Cond >= 350;
+
+figure('Name','Annual Seasonal Amplitude (STL) - Conductivity');
+subplot(2,1,1)
+plot(yearList_Cond, annualSeasonalRange_Cond, '-o'); xlabel('Year'); ylabel('Range [µS/cm]');
+title('Annual range of the seasonal component - Conductivity'); grid off
+subplot(2,1,2)
+plot(yearList_Cond, annualSeasonalStd_Cond, '-o'); xlabel('Year'); ylabel('Std [µS/cm]');
+title('Annual standard deviation of the seasonal component - Conductivity'); grid off
+exportgraphics(gcf, 'Annual Seasonal Amplitude (STL) - Conductivity.png', 'Resolution', 300);
+
+[~, tau_r_Cond, p_r_Cond, sig_r_Cond] = mannKendall(annualSeasonalRange_Cond(validYr_Cond));
+slope_r_Cond = sensSlope(annualSeasonalRange_Cond(validYr_Cond));
+fprintf('Conductivity Spannweite: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µS/cm/Jahr\n', tau_r_Cond, p_r_Cond, sig_r_Cond, slope_r_Cond);
+
+[~, tau_s_Cond, p_s_Cond, sig_s_Cond] = mannKendall(annualSeasonalStd_Cond(validYr_Cond));
+slope_s_Cond = sensSlope(annualSeasonalStd_Cond(validYr_Cond));
+fprintf('Conductivity Std-Abw.:   tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µS/cm/Jahr\n', tau_s_Cond, p_s_Cond, sig_s_Cond, slope_s_Cond);
+
+x_r_Cond = annualSeasonalRange_Cond(validYr_Cond); n_r_Cond = numel(x_r_Cond); xbar_r_Cond = mean(x_r_Cond);
+r1_r_Cond = sum((x_r_Cond(1:end-1)-xbar_r_Cond).*(x_r_Cond(2:end)-xbar_r_Cond)) / sum((x_r_Cond-xbar_r_Cond).^2);
+fprintf('Conductivity Spannweite r1 = %.3f (Grenze ±%.3f)\n', r1_r_Cond, 1.96/sqrt(n_r_Cond));
+[~, ~, p_r_Cond_c, sig_r_Cond_c, neff_r_Cond] = mannKendallCorrected(x_r_Cond, r1_r_Cond);
+fprintf('Conductivity Spannweite korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_r_Cond_c, sig_r_Cond_c, neff_r_Cond, n_r_Cond);
+
+x_s_Cond = annualSeasonalStd_Cond(validYr_Cond); n_s_Cond = numel(x_s_Cond); xbar_s_Cond = mean(x_s_Cond);
+r1_s_Cond = sum((x_s_Cond(1:end-1)-xbar_s_Cond).*(x_s_Cond(2:end)-xbar_s_Cond)) / sum((x_s_Cond-xbar_s_Cond).^2);
+fprintf('Conductivity Std-Abw. r1 = %.3f (Grenze ±%.3f)\n', r1_s_Cond, 1.96/sqrt(n_s_Cond));
+[~, ~, p_s_Cond_c, sig_s_Cond_c, neff_s_Cond] = mannKendallCorrected(x_s_Cond, r1_s_Cond);
+fprintf('Conductivity Std-Abw. korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_s_Cond_c, sig_s_Cond_c, neff_s_Cond, n_s_Cond);
+
+%% Driver-Data: Conductivity - Day-of-Year-Climatology & Anomaly 
+
+doy_Cond = day(Condraw.time, 'dayofyear');
+[G_doy_Cond, doyList_Cond] = findgroups(doy_Cond);
+clim_doy_Cond = splitapply(@(x) mean(x,'omitnan'), Condraw.value, G_doy_Cond);
+
+climLookup_Cond = nan(366,1);
+climLookup_Cond(doyList_Cond) = clim_doy_Cond;
+
+Condraw.anomaly = Condraw.value - climLookup_Cond(doy_Cond);
+
+%% Driver-Data: pH 
+
+pHraw = readtable("Bunthaus pH.csv","NumHeaderLines",5,"ReadVariableNames",true,"DecimalSeparator",",","Delimiter",";");
+pHraw = renamevars(pHraw,["Zeitstempel","Wert"],["time","value"]);
+if width(pHraw) > 2
+    pHraw = pHraw(:,{'time','value'});
+end
+
+pHraw = table2timetable(pHraw, 'RowTimes','time');
+pHraw = retime(pHraw, 'regular', 'fillwithmissing', 'TimeStep', days(1));
+pHraw = timetable2table(pHraw, 'ConvertRowTimes', true);
+
+pHraw.flag = repmat("measurement", height(pHraw), 1);
+pHraw.wasMissingOriginal = isnan(pHraw.value);
+pHraw.flag(pHraw.wasMissingOriginal) = "missing_value";
+pHraw.wasOutlier = false(height(pHraw),1);
+
+fprintf('pH - Zeitraum: %s bis %s, Zeilen: %d\n', ...
+    datestr(min(pHraw.time)), datestr(max(pHraw.time)), height(pHraw));
+
+% Driver-Daten: pH (Rate-of-Change)
+
+dailyJump = diff(pHraw.value);
+
+figure('Name','Verteilung der Tag-zu-Tag-Sprünge - pH');
+histogram(dailyJump, 'BinWidth', 0.05);
+xlabel('pH Change per Day'); ylabel('Frequency'); grid off
+exportgraphics(gcf, 'Verteilung der Tag-zu-Tag-Sprünge - pH.png', 'Resolution', 300);
+
+sdJump = std(dailyJump, 'omitnan');
+threshold_provisional = 6 * sdJump; % ADJUST ACCORDINGLY
+fprintf('Vorläufiger Rate-of-Change-Schwellenwert pH (6xSD): %.3f /Tag\n', threshold_provisional);
+
+jumpThreshold_pH = threshold_provisional;  
+
+diffPrev = [NaN; diff(pHraw.value)];
+diffNext = [diff(pHraw.value); NaN];
+isSpike = abs(diffPrev) > jumpThreshold_pH & abs(diffNext) > jumpThreshold_pH;
+
+fprintf('Als isolierter Spike markiert (pH): %d Punkte\n', sum(isSpike));
+
+pHraw.value(isSpike) = NaN;
+pHraw.wasOutlier(isSpike) = true;
+pHraw.flag(isSpike) = "outlier_rateofchange";
+
+% Driver-Data: pH - Interpolation
+
+nanBefore = isnan(pHraw.value);
+pHraw.value = fillmissing(pHraw.value, 'linear', 'MaxGap',3);
+pHraw.flag(nanBefore & ~isnan(pHraw.value)) = "linear_interpoliert";
+
+nanBefore = isnan(pHraw.value);
+pHraw.value = fillmissing(pHraw.value, 'spline', 'MaxGap', 6);
+pHraw.flag(nanBefore & ~isnan(pHraw.value)) = "spline_interpoliert";
+
+doy = day(pHraw.time, 'dayofyear');
+validIdx = ~isnan(pHraw.value);
+[G, doyList] = findgroups(doy(validIdx));
+climMean = splitapply(@mean, pHraw.value(validIdx), G);
+climLookup = nan(366,1);
+climLookup(doyList) = climMean;
+
+missingIdx = isnan(pHraw.value);
+pHraw.value(missingIdx) = climLookup(doy(missingIdx));
+pHraw.flag(missingIdx) = "klimatologisch_gefuellt";
+
+assert(sum(isnan(pHraw.value)) == 0, "Es sind noch NaN in pHraw.value vorhanden.");
+summary(categorical(pHraw.flag))
+
+%% Driver-Data: pH - Seasonality (STL)
+
+TT_pH = table2timetable(pHraw(:,["time","value"]));
+[longtermTrend_pH, seasonalTrend_pH, residual_pH] = trenddecomp(TT_pH.value, 'stl', 365);
+
+figure("Name", "STL Decomposition - pH");
+subplot(4,1,1), plot(TT_pH.time, TT_pH.value), title('Original pH Data'), grid off;
+subplot(4,1,2), plot(TT_pH.time, longtermTrend_pH), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT_pH.time, seasonalTrend_pH), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT_pH.time, residual_pH), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition - pH.png', 'Resolution', 300);
+
+Fs_pH = max(0, 1 - var(residual_pH,'omitnan') / var(seasonalTrend_pH + residual_pH, 'omitnan'));
+fprintf('Saisonalitätsstärke pH (Fs): %.3f\n', Fs_pH);
+
+%% Driver-Data: pH - Trend of Seasonal Amplitude
+
+years_pH = year(TT_pH.time);
+[G_pH, yearList_pH] = findgroups(years_pH);
+
+annualSeasonalRange_pH = splitapply(@(x) max(x)-min(x), seasonalTrend_pH, G_pH);
+annualSeasonalStd_pH   = splitapply(@std, seasonalTrend_pH, G_pH);
+daysPerYear_pH         = splitapply(@numel, seasonalTrend_pH, G_pH);
+
+validYr_pH = daysPerYear_pH >= 350;
+
+figure('Name','Annual Seasonal Amplitude (STL) - pH');
+subplot(2,1,1)
+plot(yearList_pH, annualSeasonalRange_pH, '-o'); xlabel('Year'); ylabel('Range [pH]');
+title('Annual range of the seasonal component - pH'); grid off
+subplot(2,1,2)
+plot(yearList_pH, annualSeasonalStd_pH, '-o'); xlabel('Year'); ylabel('Std [pH]');
+title('Annual standard deviation of the seasonal component - pH'); grid off
+exportgraphics(gcf, 'Annual Seasonal Amplitude (STL) - pH.png', 'Resolution', 300);
+
+[~, tau_r_pH, p_r_pH, sig_r_pH] = mannKendall(annualSeasonalRange_pH(validYr_pH));
+slope_r_pH = sensSlope(annualSeasonalRange_pH(validYr_pH));
+fprintf('pH Spannweite: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f /Jahr\n', tau_r_pH, p_r_pH, sig_r_pH, slope_r_pH);
+
+[~, tau_s_pH, p_s_pH, sig_s_pH] = mannKendall(annualSeasonalStd_pH(validYr_pH));
+slope_s_pH = sensSlope(annualSeasonalStd_pH(validYr_pH));
+fprintf('pH Std-Abw.:   tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f /Jahr\n', tau_s_pH, p_s_pH, sig_s_pH, slope_s_pH);
+
+x_r_pH = annualSeasonalRange_pH(validYr_pH); n_r_pH = numel(x_r_pH); xbar_r_pH = mean(x_r_pH);
+r1_r_pH = sum((x_r_pH(1:end-1)-xbar_r_pH).*(x_r_pH(2:end)-xbar_r_pH)) / sum((x_r_pH-xbar_r_pH).^2);
+fprintf('pH Spannweite r1 = %.3f (Grenze ±%.3f)\n', r1_r_pH, 1.96/sqrt(n_r_pH));
+[~, ~, p_r_pH_c, sig_r_pH_c, neff_r_pH] = mannKendallCorrected(x_r_pH, r1_r_pH);
+fprintf('pH Spannweite korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_r_pH_c, sig_r_pH_c, neff_r_pH, n_r_pH);
+
+x_s_pH = annualSeasonalStd_pH(validYr_pH); n_s_pH = numel(x_s_pH); xbar_s_pH = mean(x_s_pH);
+r1_s_pH = sum((x_s_pH(1:end-1)-xbar_s_pH).*(x_s_pH(2:end)-xbar_s_pH)) / sum((x_s_pH-xbar_s_pH).^2);
+fprintf('pH Std-Abw. r1 = %.3f (Grenze ±%.3f)\n', r1_s_pH, 1.96/sqrt(n_s_pH));
+[~, ~, p_s_pH_c, sig_s_pH_c, neff_s_pH] = mannKendallCorrected(x_s_pH, r1_s_pH);
+fprintf('pH Std-Abw. korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_s_pH_c, sig_s_pH_c, neff_s_pH, n_s_pH);
+
+%% Driver-Data: pH - Day-of-Year-Climatology & Anomaly 
+
+doy_pH = day(pHraw.time, 'dayofyear');
+[G_doy_pH, doyList_pH] = findgroups(doy_pH);
+clim_doy_pH = splitapply(@(x) mean(x,'omitnan'), pHraw.value, G_doy_pH);
+
+climLookup_pH = nan(366,1);
+climLookup_pH(doyList_pH) = clim_doy_pH;
+
+pHraw.anomaly = pHraw.value - climLookup_pH(doy_pH);
+
+%% Driver-Data: Chlorophyll 
+
+Chlraw = readtable("Bunthaus Chl 2001-2025.csv","NumHeaderLines",0,"ReadVariableNames",true,"DecimalSeparator",",","Delimiter",";");
+Chlraw = renamevars(Chlraw,["timestamp","value"],["time","value"]);
+
+Chlraw = table2timetable(Chlraw, 'RowTimes','time');
+Chlraw = retime(Chlraw, 'regular', 'fillwithmissing', 'TimeStep', days(1));
+Chlraw = timetable2table(Chlraw, 'ConvertRowTimes', true);
+
+Chlraw.flag = repmat("measurement", height(Chlraw), 1);
+Chlraw.wasMissingOriginal = isnan(Chlraw.value);
+Chlraw.flag(Chlraw.wasMissingOriginal) = "missing_value";
+Chlraw.wasOutlier = false(height(Chlraw),1);
+
+fprintf('Chlorophyll - Zeitraum: %s bis %s, Zeilen: %d\n', ...
+    datestr(min(Chlraw.time)), datestr(max(Chlraw.time)), height(Chlraw));
+
+% Driver-Daten: Chlorophyll (Rate-of-Change)
+
+dailyJump = diff(Chlraw.value);
+
+figure('Name','Verteilung der Tag-zu-Tag-Sprünge - Chlorophyll');
+histogram(dailyJump, 'BinWidth', 2);
+xlabel('Chlorophyll Change [µg/L] per Day'); ylabel('Frequency'); grid off
+exportgraphics(gcf, 'Verteilung der Tag-zu-Tag-Sprünge - Chlorophyll.png', 'Resolution', 300);
+
+sdJump = std(dailyJump, 'omitnan');
+threshold_provisional = 7 * sdJump;  % ADJUST ACCORDINGLY 
+fprintf('Vorläufiger Rate-of-Change-Schwellenwert Chlorophyll (7xSD): %.2f /Tag\n', threshold_provisional);
+
+jumpThreshold_Chl = threshold_provisional;  
+
+diffPrev = [NaN; diff(Chlraw.value)];
+diffNext = [diff(Chlraw.value); NaN];
+isSpike = abs(diffPrev) > jumpThreshold_Chl & abs(diffNext) > jumpThreshold_Chl;
+
+fprintf('Als isolierter Spike markiert (Chlorophyll): %d Punkte\n', sum(isSpike));
+
+Chlraw.value(isSpike) = NaN;
+Chlraw.wasOutlier(isSpike) = true;
+Chlraw.flag(isSpike) = "outlier_rateofchange";
+
+% Driver-Data: Chlorophyll - Interpolation
+
+nanBefore = isnan(Chlraw.value);
+Chlraw.value = fillmissing(Chlraw.value, 'linear', 'MaxGap',3);
+Chlraw.flag(nanBefore & ~isnan(Chlraw.value)) = "linear_interpoliert";
+
+nanBefore = isnan(Chlraw.value);
+Chlraw.value = fillmissing(Chlraw.value, 'spline', 'MaxGap', 6);
+Chlraw.flag(nanBefore & ~isnan(Chlraw.value)) = "spline_interpoliert";
+
+doy = day(Chlraw.time, 'dayofyear');
+validIdx = ~isnan(Chlraw.value);
+[G, doyList] = findgroups(doy(validIdx));
+climMean = splitapply(@mean, Chlraw.value(validIdx), G);
+climLookup = nan(366,1);
+climLookup(doyList) = climMean;
+
+missingIdx = isnan(Chlraw.value);
+Chlraw.value(missingIdx) = climLookup(doy(missingIdx));
+Chlraw.flag(missingIdx) = "klimatologisch_gefuellt";
+
+assert(sum(isnan(Chlraw.value)) == 0, "Es sind noch NaN in Chlraw.value vorhanden.");
+summary(categorical(Chlraw.flag))
+
+%% Driver-Data: Chlorophyll - Seasonality (STL)
+
+TT_Chl = table2timetable(Chlraw(:,["time","value"]));
+[longtermTrend_Chl, seasonalTrend_Chl, residual_Chl] = trenddecomp(TT_Chl.value, 'stl', 365);
+
+figure("Name", "STL Decomposition - Chlorophyll");
+subplot(4,1,1), plot(TT_Chl.time, TT_Chl.value), title('Original Chlorophyll Data'), grid off;
+subplot(4,1,2), plot(TT_Chl.time, longtermTrend_Chl), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT_Chl.time, seasonalTrend_Chl), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT_Chl.time, residual_Chl), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition - Chlorophyll.png', 'Resolution', 300);
+
+Fs_Chl = max(0, 1 - var(residual_Chl,'omitnan') / var(seasonalTrend_Chl + residual_Chl, 'omitnan'));
+fprintf('Saisonalitätsstärke Chlorophyll (Fs): %.3f\n', Fs_Chl);
+
+%% Driver-Data: Chlorophyll - Trend of Seasonal Amplitude
+
+years_Chl = year(TT_Chl.time);
+[G_Chl, yearList_Chl] = findgroups(years_Chl);
+
+annualSeasonalRange_Chl = splitapply(@(x) max(x)-min(x), seasonalTrend_Chl, G_Chl);
+annualSeasonalStd_Chl   = splitapply(@std, seasonalTrend_Chl, G_Chl);
+daysPerYear_Chl         = splitapply(@numel, seasonalTrend_Chl, G_Chl);
+
+validYr_Chl = daysPerYear_Chl >= 350;
+
+figure('Name','Annual Seasonal Amplitude (STL) - Chlorophyll');
+subplot(2,1,1)
+plot(yearList_Chl, annualSeasonalRange_Chl, '-o'); xlabel('Year'); ylabel('Range [µg/L]');
+title('Annual range of the seasonal component - Chlorophyll'); grid off
+subplot(2,1,2)
+plot(yearList_Chl, annualSeasonalStd_Chl, '-o'); xlabel('Year'); ylabel('Std [µg/L]');
+title('Annual standard deviation of the seasonal component - Chlorophyll'); grid off
+exportgraphics(gcf, 'Annual Seasonal Amplitude (STL) - Chlorophyll.png', 'Resolution', 300);
+
+[~, tau_r_Chl, p_r_Chl, sig_r_Chl] = mannKendall(annualSeasonalRange_Chl(validYr_Chl));
+slope_r_Chl = sensSlope(annualSeasonalRange_Chl(validYr_Chl));
+fprintf('Chlorophyll Spannweite: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µg/L/Jahr\n', tau_r_Chl, p_r_Chl, sig_r_Chl, slope_r_Chl);
+
+[~, tau_s_Chl, p_s_Chl, sig_s_Chl] = mannKendall(annualSeasonalStd_Chl(validYr_Chl));
+slope_s_Chl = sensSlope(annualSeasonalStd_Chl(validYr_Chl));
+fprintf('Chlorophyll Std-Abw.:   tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µg/L/Jahr\n', tau_s_Chl, p_s_Chl, sig_s_Chl, slope_s_Chl);
+
+x_r_Chl = annualSeasonalRange_Chl(validYr_Chl); n_r_Chl = numel(x_r_Chl); xbar_r_Chl = mean(x_r_Chl);
+r1_r_Chl = sum((x_r_Chl(1:end-1)-xbar_r_Chl).*(x_r_Chl(2:end)-xbar_r_Chl)) / sum((x_r_Chl-xbar_r_Chl).^2);
+fprintf('Chlorophyll Spannweite r1 = %.3f (Grenze ±%.3f)\n', r1_r_Chl, 1.96/sqrt(n_r_Chl));
+[~, ~, p_r_Chl_c, sig_r_Chl_c, neff_r_Chl] = mannKendallCorrected(x_r_Chl, r1_r_Chl);
+fprintf('Chlorophyll Spannweite korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_r_Chl_c, sig_r_Chl_c, neff_r_Chl, n_r_Chl);
+
+x_s_Chl = annualSeasonalStd_Chl(validYr_Chl); n_s_Chl = numel(x_s_Chl); xbar_s_Chl = mean(x_s_Chl);
+r1_s_Chl = sum((x_s_Chl(1:end-1)-xbar_s_Chl).*(x_s_Chl(2:end)-xbar_s_Chl)) / sum((x_s_Chl-xbar_s_Chl).^2);
+fprintf('Chlorophyll Std-Abw. r1 = %.3f (Grenze ±%.3f)\n', r1_s_Chl, 1.96/sqrt(n_s_Chl));
+[~, ~, p_s_Chl_c, sig_s_Chl_c, neff_s_Chl] = mannKendallCorrected(x_s_Chl, r1_s_Chl);
+fprintf('Chlorophyll Std-Abw. korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_s_Chl_c, sig_s_Chl_c, neff_s_Chl, n_s_Chl);
+
+%% Driver-Data: Chlorophyll - Breakpoint 
+
+yearsValid_Chl = yearList_Chl(validYr_Chl);
+bAmpChl = findChangepointLinear(annualSeasonalRange_Chl(validYr_Chl), 3);
+breakYearAmpChl = yearsValid_Chl(bAmpChl);
+fprintf('Bruchpunkt Saisonamplitude Chlorophyll: %d\n', breakYearAmpChl);
+
+phaseAmpChl1 = annualSeasonalRange_Chl(validYr_Chl & yearList_Chl <  breakYearAmpChl);
+phaseAmpChl2 = annualSeasonalRange_Chl(validYr_Chl & yearList_Chl >= breakYearAmpChl);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseAmpChl1), numel(phaseAmpChl2));
+
+[~, tauAmpChl1, pAmpChl1, sigAmpChl1] = mannKendall(phaseAmpChl1); slopeAmpChl1 = sensSlope(phaseAmpChl1);
+[~, tauAmpChl2, pAmpChl2, sigAmpChl2] = mannKendall(phaseAmpChl2); slopeAmpChl2 = sensSlope(phaseAmpChl2);
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µg/L/Jahr\n', breakYearAmpChl, tauAmpChl1,pAmpChl1,sigAmpChl1,slopeAmpChl1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µg/L/Jahr\n', breakYearAmpChl, tauAmpChl2,pAmpChl2,sigAmpChl2,slopeAmpChl2);
+
+n1 = numel(phaseAmpChl1); xbar1 = mean(phaseAmpChl1);
+r1_AmpChl1 = sum((phaseAmpChl1(1:end-1)-xbar1).*(phaseAmpChl1(2:end)-xbar1)) / sum((phaseAmpChl1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_AmpChl1, 1.96/sqrt(n1));
+
+n2 = numel(phaseAmpChl2); xbar2 = mean(phaseAmpChl2);
+r1_AmpChl2 = sum((phaseAmpChl2(1:end-1)-xbar2).*(phaseAmpChl2(2:end)-xbar2)) / sum((phaseAmpChl2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_AmpChl2, 1.96/sqrt(n2));
+
+[~, ~, pAmpChl1c, sigAmpChl1c, neffAmpChl1] = mannKendallCorrected(phaseAmpChl1, r1_AmpChl1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pAmpChl1c, sigAmpChl1c, neffAmpChl1, numel(phaseAmpChl1));
+
+[~, ~, pAmpChl2c, sigAmpChl2c, neffAmpChl2] = mannKendallCorrected(phaseAmpChl2, r1_AmpChl2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pAmpChl2c, sigAmpChl2c, neffAmpChl2, numel(phaseAmpChl2));
+
+%% Driver-Data: Chlorophyll - Day-of-Year-Climatology & Anomaly 
+
+years_Chl_obs = year(Chlraw.time);
+doy_Chl_obs   = day(Chlraw.time, 'dayofyear');
+yearListChl   = unique(years_Chl_obs);
+
+Chlraw.anomaly = NaN(height(Chlraw),1);
+
+for k = 1:numel(yearListChl)
+    yr = yearListChl(k);
+    windowIdx = years_Chl_obs >= (yr-5) & years_Chl_obs <= (yr+5);  
+
+    [Gw, doyListw] = findgroups(doy_Chl_obs(windowIdx));
+    climw = splitapply(@(x) mean(x,'omitnan'), Chlraw.value(windowIdx), Gw);
+    climLookupW = nan(366,1);
+    climLookupW(doyListw) = climw;
+
+    thisYearIdx = years_Chl_obs == yr;
+    Chlraw.anomaly(thisYearIdx) = Chlraw.value(thisYearIdx) - climLookupW(doy_Chl_obs(thisYearIdx));
+end
+
+%% Driver-Data: Turbidity
+
+Turraw = readtable("Bunthaus Tur.csv","NumHeaderLines",0,"ReadVariableNames",true,"DecimalSeparator",",","Delimiter",";");
+Turraw = renamevars(Turraw,["timestamp","value"],["time","value"]);
+
+Turraw = table2timetable(Turraw, 'RowTimes','time');
+Turraw = retime(Turraw, 'regular', 'fillwithmissing', 'TimeStep', days(1));
+Turraw = timetable2table(Turraw, 'ConvertRowTimes', true);
+
+Turraw.flag = repmat("measurement", height(Turraw), 1);
+Turraw.wasMissingOriginal = isnan(Turraw.value);
+Turraw.flag(Turraw.wasMissingOriginal) = "missing_value";
+Turraw.wasOutlier = false(height(Turraw),1);
+
+fprintf('Trübung - Zeitraum: %s bis %s, Zeilen: %d\n', ...
+    datestr(min(Turraw.time)), datestr(max(Turraw.time)), height(Turraw));
+
+% Driver-Daten: Trübung (Rate-of-Change)
+
+dailyJump = diff(Turraw.value);
+
+figure('Name','Verteilung der Tag-zu-Tag-Sprünge - Trübung');
+histogram(dailyJump, 'BinWidth', 1);
+xlabel('Turbidity Change [FNU] per Day'); ylabel('Frequency'); grid off
+exportgraphics(gcf, 'Verteilung der Tag-zu-Tag-Sprünge - Trübung.png', 'Resolution', 300);
+
+sdJump = std(dailyJump, 'omitnan');
+threshold_provisional = 5 * sdJump;  % ADJUST ACCORDINGLY
+fprintf('Vorläufiger Rate-of-Change-Schwellenwert Trübung (5xSD): %.2f /Tag\n', threshold_provisional);
+
+jumpThreshold_Tur = threshold_provisional;  
+
+diffPrev = [NaN; diff(Turraw.value)];
+diffNext = [diff(Turraw.value); NaN];
+isSpike = abs(diffPrev) > jumpThreshold_Tur & abs(diffNext) > jumpThreshold_Tur;
+
+fprintf('Als isolierter Spike markiert (Trübung): %d Punkte\n', sum(isSpike));
+
+Turraw.value(isSpike) = NaN;
+Turraw.wasOutlier(isSpike) = true;
+Turraw.flag(isSpike) = "outlier_rateofchange";
+
+% Driver-Data: Turbidity - Interpolation
+
+nanBefore = isnan(Turraw.value);
+Turraw.value = fillmissing(Turraw.value, 'linear', 'MaxGap',3);
+Turraw.flag(nanBefore & ~isnan(Turraw.value)) = "linear_interpoliert";
+
+nanBefore = isnan(Turraw.value);
+Turraw.value = fillmissing(Turraw.value, 'spline', 'MaxGap', 6);
+Turraw.flag(nanBefore & ~isnan(Turraw.value)) = "spline_interpoliert";
+
+doy = day(Turraw.time, 'dayofyear');
+validIdx = ~isnan(Turraw.value);
+[G, doyList] = findgroups(doy(validIdx));
+climMean = splitapply(@mean, Turraw.value(validIdx), G);
+climLookup = nan(366,1);
+climLookup(doyList) = climMean;
+
+missingIdx = isnan(Turraw.value);
+Turraw.value(missingIdx) = climLookup(doy(missingIdx));
+Turraw.flag(missingIdx) = "klimatologisch_gefuellt";
+
+assert(sum(isnan(Turraw.value)) == 0, "Es sind noch NaN in Turraw.value vorhanden.");
+summary(categorical(Turraw.flag))
+
+
+%% Driver-Data: Turbidity - Seasonality (STL)
+
+TT_Tur = table2timetable(Turraw(:,["time","value"]));
+[longtermTrend_Tur, seasonalTrend_Tur, residual_Tur] = trenddecomp(TT_Tur.value, 'stl', 365);
+
+figure("Name", "STL Decomposition - Trübung");
+subplot(4,1,1), plot(TT_Tur.time, TT_Tur.value), title('Original Turbidity Data'), grid off;
+subplot(4,1,2), plot(TT_Tur.time, longtermTrend_Tur), title('Trend Component'), grid off;
+subplot(4,1,3), plot(TT_Tur.time, seasonalTrend_Tur), title('Seasonal Component'), grid off;
+subplot(4,1,4), plot(TT_Tur.time, residual_Tur), title('Residual Component'), grid off;
+exportgraphics(gcf, 'STL Decomposition - Trübung.png', 'Resolution', 300);
+
+Fs_Tur = max(0, 1 - var(residual_Tur,'omitnan') / var(seasonalTrend_Tur + residual_Tur, 'omitnan'));
+fprintf('Saisonalitätsstärke Trübung (Fs): %.3f\n', Fs_Tur);
+
+%% Driver-Daten: Turbidity - Trend of Seasonal Amplitude
+
+years_Tur = year(TT_Tur.time);
+[G_Tur, yearList_Tur] = findgroups(years_Tur);
+
+annualSeasonalRange_Tur = splitapply(@(x) max(x)-min(x), seasonalTrend_Tur, G_Tur);
+annualSeasonalStd_Tur   = splitapply(@std, seasonalTrend_Tur, G_Tur);
+daysPerYear_Tur         = splitapply(@numel, seasonalTrend_Tur, G_Tur);
+
+validYr_Tur = daysPerYear_Tur >= 350;
+
+figure('Name','Annual Seasonal Amplitude (STL) - Trübung');
+subplot(2,1,1)
+plot(yearList_Tur, annualSeasonalRange_Tur, '-o'); xlabel('Year'); ylabel('Range [FNU]');
+title('Annual range of the seasonal component - Trübung'); grid off
+subplot(2,1,2)
+plot(yearList_Tur, annualSeasonalStd_Tur, '-o'); xlabel('Year'); ylabel('Std [FNU]');
+title('Annual standard deviation of the seasonal component - Trübung'); grid off
+exportgraphics(gcf, 'Annual Seasonal Amplitude (STL) - Trübung.png', 'Resolution', 300);
+
+[~, tau_r_Tur, p_r_Tur, sig_r_Tur] = mannKendall(annualSeasonalRange_Tur(validYr_Tur));
+slope_r_Tur = sensSlope(annualSeasonalRange_Tur(validYr_Tur));
+fprintf('Trübung Spannweite: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', tau_r_Tur, p_r_Tur, sig_r_Tur, slope_r_Tur);
+
+[~, tau_s_Tur, p_s_Tur, sig_s_Tur] = mannKendall(annualSeasonalStd_Tur(validYr_Tur));
+slope_s_Tur = sensSlope(annualSeasonalStd_Tur(validYr_Tur));
+fprintf('Trübung Std-Abw.:   tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', tau_s_Tur, p_s_Tur, sig_s_Tur, slope_s_Tur);
+
+x_r_Tur = annualSeasonalRange_Tur(validYr_Tur); n_r_Tur = numel(x_r_Tur); xbar_r_Tur = mean(x_r_Tur);
+r1_r_Tur = sum((x_r_Tur(1:end-1)-xbar_r_Tur).*(x_r_Tur(2:end)-xbar_r_Tur)) / sum((x_r_Tur-xbar_r_Tur).^2);
+fprintf('Trübung Spannweite r1 = %.3f (Grenze ±%.3f)\n', r1_r_Tur, 1.96/sqrt(n_r_Tur));
+[~, ~, p_r_Tur_c, sig_r_Tur_c, neff_r_Tur] = mannKendallCorrected(x_r_Tur, r1_r_Tur);
+fprintf('Trübung Spannweite korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_r_Tur_c, sig_r_Tur_c, neff_r_Tur, n_r_Tur);
+
+x_s_Tur = annualSeasonalStd_Tur(validYr_Tur); n_s_Tur = numel(x_s_Tur); xbar_s_Tur = mean(x_s_Tur);
+r1_s_Tur = sum((x_s_Tur(1:end-1)-xbar_s_Tur).*(x_s_Tur(2:end)-xbar_s_Tur)) / sum((x_s_Tur-xbar_s_Tur).^2);
+fprintf('Trübung Std-Abw. r1 = %.3f (Grenze ±%.3f)\n', r1_s_Tur, 1.96/sqrt(n_s_Tur));
+[~, ~, p_s_Tur_c, sig_s_Tur_c, neff_s_Tur] = mannKendallCorrected(x_s_Tur, r1_s_Tur);
+fprintf('Trübung Std-Abw. korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_s_Tur_c, sig_s_Tur_c, neff_s_Tur, n_s_Tur); 
+
+% Driver-Data: Turbidity - Breakpoint 
+
+yearsValid_Tur = yearList_Tur(validYr_Tur);
+bAmpTur = findChangepointLinear(annualSeasonalRange_Tur(validYr_Tur), 3);
+breakYearAmpTur = yearsValid_Tur(bAmpTur);
+fprintf('Bruchpunkt Saisonamplitude Trübung: %d\n', breakYearAmpTur);
+
+phaseAmpTur1 = annualSeasonalRange_Tur(validYr_Tur & yearList_Tur <  breakYearAmpTur);
+phaseAmpTur2 = annualSeasonalRange_Tur(validYr_Tur & yearList_Tur >= breakYearAmpTur);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseAmpTur1), numel(phaseAmpTur2));
+
+[~, tauAmpTur1, pAmpTur1, sigAmpTur1] = mannKendall(phaseAmpTur1); slopeAmpTur1 = sensSlope(phaseAmpTur1);
+[~, tauAmpTur2, pAmpTur2, sigAmpTur2] = mannKendall(phaseAmpTur2); slopeAmpTur2 = sensSlope(phaseAmpTur2);
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', breakYearAmpTur, tauAmpTur1,pAmpTur1,sigAmpTur1,slopeAmpTur1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', breakYearAmpTur, tauAmpTur2,pAmpTur2,sigAmpTur2,slopeAmpTur2);
+
+n1 = numel(phaseAmpTur1); xbar1 = mean(phaseAmpTur1);
+r1_AmpTur1 = sum((phaseAmpTur1(1:end-1)-xbar1).*(phaseAmpTur1(2:end)-xbar1)) / sum((phaseAmpTur1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_AmpTur1, 1.96/sqrt(n1));
+
+n2 = numel(phaseAmpTur2); xbar2 = mean(phaseAmpTur2);
+r1_AmpTur2 = sum((phaseAmpTur2(1:end-1)-xbar2).*(phaseAmpTur2(2:end)-xbar2)) / sum((phaseAmpTur2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_AmpTur2, 1.96/sqrt(n2));
+
+[~, ~, pAmpTur1c, sigAmpTur1c, neffAmpTur1] = mannKendallCorrected(phaseAmpTur1, r1_AmpTur1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pAmpTur1c, sigAmpTur1c, neffAmpTur1, numel(phaseAmpTur1));
+
+[~, ~, pAmpTur2c, sigAmpTur2c, neffAmpTur2] = mannKendallCorrected(phaseAmpTur2, r1_AmpTur2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pAmpTur2c, sigAmpTur2c, neffAmpTur2, numel(phaseAmpTur2));
+
+%% Driver-Daten: Turbidity - Day-of-Year-Climatology & Anomaly 
+
+years_Tur_obs = year(Turraw.time);
+doy_Tur_obs   = day(Turraw.time, 'dayofyear');
+
+idxPhase1_Tur = years_Tur_obs <  breakYearAmpTur;
+idxPhase2_Tur = years_Tur_obs >= breakYearAmpTur;
+
+[G1_Tur, doyList1_Tur] = findgroups(doy_Tur_obs(idxPhase1_Tur));
+clim1_Tur = splitapply(@(x) mean(x,'omitnan'), Turraw.value(idxPhase1_Tur), G1_Tur);
+climLookup_Tur_P1 = nan(366,1);
+climLookup_Tur_P1(doyList1_Tur) = clim1_Tur;
+
+[G2_Tur, doyList2_Tur] = findgroups(doy_Tur_obs(idxPhase2_Tur));
+clim2_Tur = splitapply(@(x) mean(x,'omitnan'), Turraw.value(idxPhase2_Tur), G2_Tur);
+climLookup_Tur_P2 = nan(366,1);
+climLookup_Tur_P2(doyList2_Tur) = clim2_Tur;
+
+Turraw.anomaly = NaN(height(Turraw),1);
+Turraw.anomaly(idxPhase1_Tur) = Turraw.value(idxPhase1_Tur) - climLookup_Tur_P1(doy_Tur_obs(idxPhase1_Tur));
+Turraw.anomaly(idxPhase2_Tur) = Turraw.value(idxPhase2_Tur) - climLookup_Tur_P2(doy_Tur_obs(idxPhase2_Tur));
+
+%% DO - Day-of-Year-Climatology & Anomaly 
+
+years_DO_obs = year(DOraw.time);
+doy_DO_obs   = day(DOraw.time, 'dayofyear');
+yearListDO   = unique(years_DO_obs);
+
+DOraw.anomaly = NaN(height(DOraw),1);
+
+for k = 1:numel(yearListDO)
+    yr = yearListDO(k);
+    windowIdx = years_DO_obs >= (yr-5) & years_DO_obs <= (yr+5);
+
+    [Gw, doyListw] = findgroups(doy_DO_obs(windowIdx));
+    climw = splitapply(@(x) mean(x,'omitnan'), DOraw.value(windowIdx), Gw);
+    climLookupW = nan(366,1);
+    climLookupW(doyListw) = climw;
+
+    thisYearIdx = years_DO_obs == yr;
+    DOraw.anomaly(thisYearIdx) = DOraw.value(thisYearIdx) - climLookupW(doy_DO_obs(thisYearIdx));
+end
+
+
+%% =======================================================================
+%
+%    FROM HERE ON, ALL DRIVER ANOMALIES MATCHING THE SEASONALITY HAVE BEEN CREATED
+%                    INCLUDING THE DO ANOMALY
+%           NOW WE CAN CONTINUE WITH CROSS-CORRELATION
+%
+% ========================================================================
+
+%% 17. Cross Correlation: DO-Anomaly vs. Water Temperature-Anomaly (with Lag)
+
+maxLag = 14;  %ADJUST
+
+commonTime_Temp = intersect(DOraw.time, Tempraw.time);
+[~, idxDO_Temp]   = ismember(commonTime_Temp, DOraw.time);
+[~, idxTemp_Temp] = ismember(commonTime_Temp, Tempraw.time);
+doAnom_Temp  = DOraw.anomaly(idxDO_Temp);
+drvAnom_Temp = Tempraw.anomaly(idxTemp_Temp);
+
+lags_Temp = -maxLag:maxLag;
+corrVals_Temp = NaN(size(lags_Temp));
+
+for i = 1:numel(lags_Temp)
+    L = lags_Temp(i);
+    if L >= 0
+        doSeg  = doAnom_Temp(L+1:end);
+        drvSeg = drvAnom_Temp(1:end-L);
+    else
+        doSeg  = doAnom_Temp(1:end+L);
+        drvSeg = drvAnom_Temp(-L+1:end);
+    end
+    corrVals_Temp(i) = corr(doSeg, drvSeg, 'rows','complete');
+end
+
+[~, idxMax_Temp] = max(abs(corrVals_Temp));
+bestLag_Temp  = lags_Temp(idxMax_Temp);
+bestCorr_Temp = corrVals_Temp(idxMax_Temp);
+fprintf('Wassertemperatur: bester Lag = %d Tage, r = %.3f\n', bestLag_Temp, bestCorr_Temp);
+
+figure('Name','Kreuzkorrelation - Wassertemperatur');
+plot(lags_Temp, corrVals_Temp, '-o'); xlabel('Lag [Days]');
+ylabel('Correlation Coefficientt r'); grid off
+title('Kreuzkorrelation DO-Anomalie vs. Wassertemperatur-Anomalie');
+xline(0, '--k', 'HandleVisibility','off');
+exportgraphics(gcf, 'Kreuzkorrelation - Wassertemperatur.png', 'Resolution', 300);
+
+%% Cross Correlation: DO-Anomaly vs. Conductivity-Anomaly (with Lag)
+
+maxLag = 14; % ADJUST 
+
+commonTime_Cond = intersect(DOraw.time, Condraw.time);
+[~, idxDO_Cond]   = ismember(commonTime_Cond, DOraw.time);
+[~, idxCond_Cond] = ismember(commonTime_Cond, Condraw.time);
+doAnom_Cond  = DOraw.anomaly(idxDO_Cond);
+drvAnom_Cond = Condraw.anomaly(idxCond_Cond);
+
+lags_Cond = -maxLag:maxLag;
+corrVals_Cond = NaN(size(lags_Cond));
+
+for i = 1:numel(lags_Cond)
+    L = lags_Cond(i);
+    if L >= 0
+        doSeg  = doAnom_Cond(L+1:end);
+        drvSeg = drvAnom_Cond(1:end-L);
+    else
+        doSeg  = doAnom_Cond(1:end+L);
+        drvSeg = drvAnom_Cond(-L+1:end);
+    end
+    corrVals_Cond(i) = corr(doSeg, drvSeg, 'rows','complete');
+end
+
+[~, idxMax_Cond] = max(abs(corrVals_Cond));
+bestLag_Cond  = lags_Cond(idxMax_Cond);
+bestCorr_Cond = corrVals_Cond(idxMax_Cond);
+fprintf('Conductivity: bester Lag = %d Tage, r = %.3f\n', bestLag_Cond, bestCorr_Cond);
+
+figure('Name','Kreuzkorrelation - Conductivity');
+plot(lags_Cond, corrVals_Cond, '-o'); xlabel('Lag [Days]');
+ylabel('Correlation Coefficient r'); grid off
+title('Kreuzkorrelation DO-Anomalie vs. Conductivity-Anomalie');
+xline(0, '--k', 'HandleVisibility','off');
+exportgraphics(gcf, 'Kreuzkorrelation - Conductivity.png', 'Resolution', 300);
+
+%% Cross Correlation: DO-Anomaly vs. pH-Anomaly (with Lag)
+
+maxLag = 14; % ADJUST
+
+commonTime_pH = intersect(DOraw.time, pHraw.time);
+[~, idxDO_pH] = ismember(commonTime_pH, DOraw.time);
+[~, idxpH_pH] = ismember(commonTime_pH, pHraw.time);
+doAnom_pH  = DOraw.anomaly(idxDO_pH);
+drvAnom_pH = pHraw.anomaly(idxpH_pH);
+
+lags_pH = -maxLag:maxLag;
+corrVals_pH = NaN(size(lags_pH));
+
+for i = 1:numel(lags_pH)
+    L = lags_pH(i);
+    if L >= 0
+        doSeg  = doAnom_pH(L+1:end);
+        drvSeg = drvAnom_pH(1:end-L);
+    else
+        doSeg  = doAnom_pH(1:end+L);
+        drvSeg = drvAnom_pH(-L+1:end);
+    end
+    corrVals_pH(i) = corr(doSeg, drvSeg, 'rows','complete');
+end
+
+[~, idxMax_pH] = max(abs(corrVals_pH));
+bestLag_pH  = lags_pH(idxMax_pH);
+bestCorr_pH = corrVals_pH(idxMax_pH);
+fprintf('pH: bester Lag = %d Tage, r = %.3f\n', bestLag_pH, bestCorr_pH);
+
+figure('Name','Kreuzkorrelation - pH');
+plot(lags_pH, corrVals_pH, '-o'); xlabel('Lag [Days]');
+ylabel('Correlation Coefficient r'); grid off
+title('Kreuzkorrelation DO-Anomalie vs. pH-Anomalie');
+xline(0, '--k', 'HandleVisibility','off');
+exportgraphics(gcf, 'Kreuzkorrelation - pH.png', 'Resolution', 300);
+
+%% Cross Correlation: DO-Anomaly vs. Chlorophyll-Anomaly (with Lag)
+
+maxLag = 14; % ADJUST
+
+commonTime_Chl = intersect(DOraw.time, Chlraw.time);
+[~, idxDO_Chl]  = ismember(commonTime_Chl, DOraw.time);
+[~, idxChl_Chl] = ismember(commonTime_Chl, Chlraw.time);
+doAnom_Chl  = DOraw.anomaly(idxDO_Chl);
+drvAnom_Chl = Chlraw.anomaly(idxChl_Chl);
+
+lags_Chl = -maxLag:maxLag;
+corrVals_Chl = NaN(size(lags_Chl));
+
+for i = 1:numel(lags_Chl)
+    L = lags_Chl(i);
+    if L >= 0
+        doSeg  = doAnom_Chl(L+1:end);
+        drvSeg = drvAnom_Chl(1:end-L);
+    else
+        doSeg  = doAnom_Chl(1:end+L);
+        drvSeg = drvAnom_Chl(-L+1:end);
+    end
+    corrVals_Chl(i) = corr(doSeg, drvSeg, 'rows','complete');
+end
+
+[~, idxMax_Chl] = max(abs(corrVals_Chl));
+bestLag_Chl  = lags_Chl(idxMax_Chl);
+bestCorr_Chl = corrVals_Chl(idxMax_Chl);
+fprintf('Chlorophyll: bester Lag = %d Tage, r = %.3f\n', bestLag_Chl, bestCorr_Chl);
+
+figure('Name','Kreuzkorrelation - Chlorophyll');
+plot(lags_Chl, corrVals_Chl, '-o'); xlabel('Lag [Days]');
+ylabel('Correlation Coefficient r'); grid off
+title('Kreuzkorrelation DO-Anomalie vs. Chlorophyll-Anomalie');
+xline(0, '--k', 'HandleVisibility','off');
+exportgraphics(gcf, 'Kreuzkorrelation - Chlorophyll.png', 'Resolution', 300);
+
+%% Cross Correlation: DO-Anomaly vs. Turbidity-Anomaly (with Lag)
+
+maxLag = 14; % ADJUST
+
+commonTime_Tur = intersect(DOraw.time, Turraw.time);
+[~, idxDO_Tur]  = ismember(commonTime_Tur, DOraw.time);
+[~, idxTur_Tur] = ismember(commonTime_Tur, Turraw.time);
+doAnom_Tur  = DOraw.anomaly(idxDO_Tur);
+drvAnom_Tur = Turraw.anomaly(idxTur_Tur);
+
+lags_Tur = -maxLag:maxLag;
+corrVals_Tur = NaN(size(lags_Tur));
+
+for i = 1:numel(lags_Tur)
+    L = lags_Tur(i);
+    if L >= 0
+        doSeg  = doAnom_Tur(L+1:end);
+        drvSeg = drvAnom_Tur(1:end-L);
+    else
+        doSeg  = doAnom_Tur(1:end+L);
+        drvSeg = drvAnom_Tur(-L+1:end);
+    end
+    corrVals_Tur(i) = corr(doSeg, drvSeg, 'rows','complete');
+end
+
+[~, idxMax_Tur] = max(abs(corrVals_Tur));
+bestLag_Tur  = lags_Tur(idxMax_Tur);
+bestCorr_Tur = corrVals_Tur(idxMax_Tur);
+fprintf('Trübung: bester Lag = %d Tage, r = %.3f\n', bestLag_Tur, bestCorr_Tur);
+
+figure('Name','Kreuzkorrelation - Trübung');
+plot(lags_Tur, corrVals_Tur, '-o'); xlabel('Lag [Days]');
+ylabel('Correlation Coefficient r'); grid off
+title('Kreuzkorrelation DO-Anomalie vs. Trübungs-Anomalie');
+xline(0, '--k', 'HandleVisibility','off');
+exportgraphics(gcf, 'Kreuzkorrelation - Trübung.png', 'Resolution', 300);
+
+%% Collinearity Check four-driver (Temp, Conductivity, pH, Trübung)
+
+commonTime4 = intersect(intersect(intersect(Tempraw.time, Condraw.time), pHraw.time), Turraw.time);
+
+[~, i1] = ismember(commonTime4, Tempraw.time);
+[~, i2] = ismember(commonTime4, Condraw.time);
+[~, i3] = ismember(commonTime4, pHraw.time);
+[~, i4] = ismember(commonTime4, Turraw.time);
+
+driverMatrix = [Tempraw.anomaly(i1), Condraw.anomaly(i2), pHraw.anomaly(i3), Turraw.anomaly(i4)];
+driverNames  = {'Temperature','Conductivity','pH','Turbidity'};
+
+corrMatrix = corr(driverMatrix, 'rows','complete');
+
+figure('Name','Kollinearität der Treiber - Korrelationsmatrix');
+heatmap(driverNames, driverNames, corrMatrix, 'Colormap', parula, 'ColorLimits',[-1 1]);
+title('Paarweise Korrelation zwischen den vier Treiber-Anomalien');
+exportgraphics(gcf, 'Kollinearität der Treiber - Korrelationsmatrix.png', 'Resolution', 300);
+
+disp(array2table(corrMatrix, 'VariableNames', driverNames, 'RowNames', driverNames));
+
+% Variance Inflation Factor (VIF) 
+
+VIF = NaN(4,1);
+for j = 1:4
+    y = driverMatrix(:,j);
+    Xother = driverMatrix(:, setdiff(1:4,j));
+    mdl = fitlm(Xother, y);
+    VIF(j) = 1 / (1 - mdl.Rsquared.Ordinary);
+end
+
+VIFTable = table(driverNames', VIF, 'VariableNames', {'Driver','VIF'});
+disp(VIFTable);
+
+
+%% Collinearity Check five-driver  (Temp, Conductivity, pH, Trübung, Chlorophyll)
+
+commonTime5 = intersect(intersect(intersect(intersect(Tempraw.time, Condraw.time), pHraw.time), Turraw.time), Chlraw.time);
+
+[~, i1] = ismember(commonTime5, Tempraw.time);
+[~, i2] = ismember(commonTime5, Condraw.time);
+[~, i3] = ismember(commonTime5, pHraw.time);
+[~, i4] = ismember(commonTime5, Turraw.time);
+[~, i5] = ismember(commonTime5, Chlraw.time);
+
+driverMatrix = [Tempraw.anomaly(i1), Condraw.anomaly(i2), pHraw.anomaly(i3), Turraw.anomaly(i4), Chlraw.anomaly(i5)];
+driverNames  = {'Temperature','Conductivity','pH','Turbidity','Chlorophyll'};
+
+corrMatrix = corr(driverMatrix, 'rows','complete');
+
+figure('Name','Kollinearität der Treiber - Korrelationsmatrix');
+heatmap(driverNames, driverNames, corrMatrix, 'Colormap', parula, 'ColorLimits',[-1 1]);
+title('Paarweise Korrelation zwischen den vier Treiber-Anomalien');
+exportgraphics(gcf, 'Kollinearität der Treiber - Korrelationsmatrix2.png', 'Resolution', 300);
+
+disp(array2table(corrMatrix, 'VariableNames', driverNames, 'RowNames', driverNames));
+
+% Variance Inflation Factor (VIF)
+
+VIF = NaN(5,1);
+for j = 1:5
+    y = driverMatrix(:,j);
+    Xother = driverMatrix(:, setdiff(1:5,j));
+    mdl = fitlm(Xother, y);
+    VIF(j) = 1 / (1 - mdl.Rsquared.Ordinary);
+end
+
+VIFTable = table(driverNames', VIF, 'VariableNames', {'Driver','VIF'});
+disp(VIFTable);
+
+
+%% Multiples Regressionsmodell: DO-Anomaly ~ four Driver-Anomalies (with Lag)
+
+lag_Temp = 2;   
+lag_Cond = 0;   
+lag_pH   = 0;   
+lag_Tur  = 0;   
+
+commonTime = intersect(intersect(intersect(intersect(DOraw.time, Tempraw.time), Condraw.time), pHraw.time), Turraw.time);
+
+[tf0, idx0] = ismember(commonTime, DOraw.time);
+doResp = NaN(size(commonTime));
+doResp(tf0) = DOraw.anomaly(idx0(tf0));
+
+[tf1, idx1] = ismember(commonTime - days(lag_Temp), Tempraw.time);
+tempPred = NaN(size(commonTime));
+tempPred(tf1) = Tempraw.anomaly(idx1(tf1));
+
+[tf2, idx2] = ismember(commonTime - days(lag_Cond), Condraw.time);
+condPred = NaN(size(commonTime));
+condPred(tf2) = Condraw.anomaly(idx2(tf2));
+
+[tf3, idx3] = ismember(commonTime - days(lag_pH), pHraw.time);
+pHPred = NaN(size(commonTime));
+pHPred(tf3) = pHraw.anomaly(idx3(tf3));
+
+[tf4, idx4] = ismember(commonTime - days(lag_Tur), Turraw.time);
+turPred = NaN(size(commonTime));
+turPred(tf4) = Turraw.anomaly(idx4(tf4));
+
+driverTable = table(tempPred, condPred, pHPred, turPred, doResp, ...
+    'VariableNames', {'Temperatur','Conductivity','pH','Truebung','DO_Anomalie'});
+
+mdl_Driver = fitlm(driverTable, 'DO_Anomalie ~ Temperatur + Conductivity + pH + Truebung');
+disp(mdl_Driver)
+
+%% Extra: DO-Anomaly ~ five Driver-Anomalies with Chlorophyll 
+
+lag_Chl = 0;   
+
+commonTime5 = intersect(intersect(intersect(intersect(intersect(DOraw.time, Tempraw.time), Condraw.time), pHraw.time), Turraw.time), Chlraw.time);
+
+[tf0c, idx0c] = ismember(commonTime_Chl, DOraw.time);
+doResp_Chl = NaN(size(commonTime_Chl));
+doResp_Chl(tf0c) = DOraw.anomaly(idx0c(tf0c));
+
+[tf1c, idx1c] = ismember(commonTime_Chl - days(lag_Temp), Tempraw.time);
+tempPred_Chl = NaN(size(commonTime_Chl));
+tempPred_Chl(tf1c) = Tempraw.anomaly(idx1c(tf1c));
+
+[tf2c, idx2c] = ismember(commonTime_Chl - days(lag_Cond), Condraw.time);
+condPred_Chl = NaN(size(commonTime_Chl));
+condPred_Chl(tf2c) = Condraw.anomaly(idx2c(tf2c));
+
+[tf3c, idx3c] = ismember(commonTime_Chl - days(lag_pH), pHraw.time);
+pHPred_Chl = NaN(size(commonTime_Chl));
+pHPred_Chl(tf3c) = pHraw.anomaly(idx3c(tf3c));
+
+[tf4c, idx4c] = ismember(commonTime_Chl - days(lag_Tur), Turraw.time);
+turPred_Chl = NaN(size(commonTime_Chl));
+turPred_Chl(tf4c) = Turraw.anomaly(idx4c(tf4c));
+
+[tf5c, idx5c] = ismember(commonTime_Chl - days(lag_Chl), Chlraw.time);
+chlPred_Chl = NaN(size(commonTime_Chl));
+chlPred_Chl(tf5c) = Chlraw.anomaly(idx5c(tf5c));
+
+driverTable_Chl = table(tempPred_Chl, condPred_Chl, pHPred_Chl, turPred_Chl, chlPred_Chl, doResp_Chl, ...
+    'VariableNames', {'Temperatur','Conductivity','pH','Truebung','Chlorophyll','DO_Anomalie'});
+
+mdl_Driver_Chl = fitlm(driverTable_Chl, 'DO_Anomalie ~ Temperatur + Conductivity + pH + Truebung + Chlorophyll');
+disp(mdl_Driver_Chl)
+
+
+%% Linearity Check: Residuen diagnosis
+
+figure('Name','Residuendiagnose - Treibermodell');
+subplot(2,2,1), plotResiduals(mdl_Driver, 'fitted'); title('Residuals vs. Fitted');
+subplot(2,2,2), scatter(driverTable.Temperatur, mdl_Driver.Residuals.Raw, 5, 'filled'); xlabel('Temperature-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. Temperature');
+subplot(2,2,3), scatter(driverTable.pH, mdl_Driver.Residuals.Raw, 5, 'filled'); xlabel('pH-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. pH');
+subplot(2,2,4), scatter(driverTable.Truebung, mdl_Driver.Residuals.Raw, 5, 'filled'); xlabel('Turbidity-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. Turbidity');
+exportgraphics(gcf, 'Residuendiagnose - Treibermodell.png', 'Resolution', 300);
+
+% Pearson vs. Spearman 
+
+predictors = {'Temperatur','Conductivity','pH','Truebung'};
+for i = 1:numel(predictors)
+    pear = corr(driverTable.(predictors{i}), driverTable.DO_Anomalie, 'rows','complete', 'type','Pearson');
+    spear = corr(driverTable.(predictors{i}), driverTable.DO_Anomalie, 'rows','complete', 'type','Spearman');
+    fprintf('%s: Pearson r=%.3f, Spearman rho=%.3f (Differenz=%.3f)\n', predictors{i}, pear, spear, spear-pear);
+end
+
+studentizedRes = mdl_Driver.Residuals.Studentized;
+outlierIdx = abs(studentizedRes) > 3;   
+
+fprintf('Ausreißer (|studentisiertes Residuum| > 3): %d von %d Beobachtungen (%.2f%%)\n', ...
+    sum(outlierIdx), numel(studentizedRes), 100*sum(outlierIdx)/numel(studentizedRes));
+
+validRows = ~any(ismissing(driverTable), 2);
+commonTime_valid = commonTime(validRows);
+
+[tf, locDO] = ismember(commonTime_valid, DOraw.time);
+isEventDay_all = is_hobday_event(locDO);
+
+outlierDates      = commonTime_valid(outlierIdx);
+isEventDay_outlier = isEventDay_all(outlierIdx);
+
+fprintf('Von %d Ausreißern liegen %d (%.1f%%) innerhalb eines dokumentierten Extremevents\n', ...
+    numel(outlierDates), sum(isEventDay_outlier), 100*sum(isEventDay_outlier)/numel(outlierDates));
+
+pctOutlier_eventDays    = 100 * sum(outlierIdx & isEventDay_all)  / sum(isEventDay_all);
+pctOutlier_nonEventDays = 100 * sum(outlierIdx & ~isEventDay_all) / sum(~isEventDay_all);
+fprintf('Anteil Ausreißer an dokumentierten Event-Tagen: %.2f%%\n', pctOutlier_eventDays);
+fprintf('Anteil Ausreißer an Nicht-Event-Tagen: %.2f%%\n', pctOutlier_nonEventDays);
+
+locDO_outlier = locDO(outlierIdx);
+outlierEventNum = NaN(size(locDO_outlier));
+for i = 1:numel(locDO_outlier)
+    if isEventDay_outlier(i)
+        evNum = find(ev_start <= locDO_outlier(i) & ev_end >= locDO_outlier(i), 1);
+        if ~isempty(evNum)
+            outlierEventNum(i) = evNum;
+        end
+    end
+end
+uniqueOutlierEvents = unique(outlierEventNum(~isnan(outlierEventNum)));
+fprintf('Ausreißer verteilen sich auf %d unterschiedliche dokumentierte Events\n', numel(uniqueOutlierEvents));
+disp(event_start_date(uniqueOutlierEvents));
+
+%% Visualisation: marked outliers based on events 
+
+figure('Name','Residuen vs. Fitted - Ausreißer nach Event-Zugehörigkeit');
+fittedVals = mdl_Driver.Fitted;
+scatter(fittedVals(~outlierIdx), mdl_Driver.Residuals.Raw(~outlierIdx), 8, [0.6 0.6 0.6], 'filled', 'DisplayName','Normal'); hold on
+scatter(fittedVals(outlierIdx & ~isEventDay_all), mdl_Driver.Residuals.Raw(outlierIdx & ~isEventDay_all), 25, [0.9 0.6 0], 'filled', 'DisplayName','Outlier, no Event');
+scatter(fittedVals(outlierIdx & isEventDay_all), mdl_Driver.Residuals.Raw(outlierIdx & isEventDay_all), 25, [0.8 0 0], 'filled', 'DisplayName','Outlier, during Event');
+yline(0, '--k', 'HandleVisibility','off');
+xlabel('Fitted values'); ylabel('Residuals'); grid off
+title('Residuen vs. Fitted - Ausreißer nach Event-Zugehörigkeit');
+legend('Location','best');
+exportgraphics(gcf, 'Residuen vs. Fitted - Ausreißer nach Event-Zugehörigkeit.png', 'Resolution', 300);
+
+%% Linearity Check: Residuen diagnosis - with Chlorophyll
+
+figure('Name','Residuendiagnose - Treibermodell mit Chlorophyll');
+subplot(2,3,1), plotResiduals(mdl_Driver_Chl, 'fitted'); title('Residuen vs. Fitted');
+subplot(2,3,2), scatter(driverTable_Chl.Temperatur, mdl_Driver_Chl.Residuals.Raw, 5, 'filled'); xlabel('Temperature-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. Temperature');
+subplot(2,3,3), scatter(driverTable_Chl.pH, mdl_Driver_Chl.Residuals.Raw, 5, 'filled'); xlabel('pH-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. pH');
+subplot(2,3,4), scatter(driverTable_Chl.Truebung, mdl_Driver_Chl.Residuals.Raw, 5, 'filled'); xlabel('Turbidity-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. Turbidity');
+subplot(2,3,5), scatter(driverTable_Chl.Conductivity, mdl_Driver_Chl.Residuals.Raw, 5, 'filled'); xlabel('Conductivity-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. Conductivity');
+subplot(2,3,6), scatter(driverTable_Chl.Chlorophyll, mdl_Driver_Chl.Residuals.Raw, 5, 'filled'); xlabel('Chlorophyll-Anomaly'); ylabel('Residual'); grid off; %title('Residuals vs. Chlorophyll');
+exportgraphics(gcf, 'Residuendiagnose - Treibermodell mit Chlorophyll.png', 'Resolution', 300);
+
+% Pearson vs. Spearman 
+predictors_Chl = {'Temperatur','Conductivity','pH','Truebung','Chlorophyll'};
+for i = 1:numel(predictors_Chl)
+    pear = corr(driverTable_Chl.(predictors_Chl{i}), driverTable_Chl.DO_Anomalie, 'rows','complete', 'type','Pearson');
+    spear = corr(driverTable_Chl.(predictors_Chl{i}), driverTable_Chl.DO_Anomalie, 'rows','complete', 'type','Spearman');
+    fprintf('%s: Pearson r=%.3f, Spearman rho=%.3f (Differenz=%.3f)\n', predictors_Chl{i}, pear, spear, spear-pear);
+end
+
+% Outliers
+studentizedRes_Chl = mdl_Driver_Chl.Residuals.Studentized;
+outlierIdx_Chl = abs(studentizedRes_Chl) > 3;
+fprintf('Ausreißer (|studentisiertes Residuum| > 3): %d von %d Beobachtungen (%.2f%%)\n', ...
+    sum(outlierIdx_Chl), numel(studentizedRes_Chl), 100*sum(outlierIdx_Chl)/numel(studentizedRes_Chl));
+
+validRows_Chl = ~any(ismissing(driverTable_Chl), 2);
+commonTime_Chl_valid = commonTime_Chl(validRows_Chl);
+[tf_c, locDO_c] = ismember(commonTime_Chl_valid, DOraw.time);
+isEventDay_all_Chl = is_hobday_event(locDO_c);
+
+outlierDates_Chl      = commonTime_Chl_valid(outlierIdx_Chl);
+isEventDay_outlier_Chl = isEventDay_all_Chl(outlierIdx_Chl);
+fprintf('Von %d Ausreißern liegen %d (%.1f%%) innerhalb eines dokumentierten Extremevents\n', ...
+    numel(outlierDates_Chl), sum(isEventDay_outlier_Chl), 100*sum(isEventDay_outlier_Chl)/numel(outlierDates_Chl));
+
+pctOutlier_eventDays_Chl    = 100 * sum(outlierIdx_Chl & isEventDay_all_Chl)  / sum(isEventDay_all_Chl);
+pctOutlier_nonEventDays_Chl = 100 * sum(outlierIdx_Chl & ~isEventDay_all_Chl) / sum(~isEventDay_all_Chl);
+fprintf('Anteil Ausreißer an dokumentierten Event-Tagen: %.2f%%\n', pctOutlier_eventDays_Chl);
+fprintf('Anteil Ausreißer an Nicht-Event-Tagen: %.2f%%\n', pctOutlier_nonEventDays_Chl);
+
+locDO_outlier_Chl = locDO_c(outlierIdx_Chl);
+outlierEventNum_Chl = NaN(size(locDO_outlier_Chl));
+for i = 1:numel(locDO_outlier_Chl)
+    if isEventDay_outlier_Chl(i)
+        evNum = find(ev_start <= locDO_outlier_Chl(i) & ev_end >= locDO_outlier_Chl(i), 1);
+        if ~isempty(evNum)
+            outlierEventNum_Chl(i) = evNum;
+        end
+    end
+end
+uniqueOutlierEvents_Chl = unique(outlierEventNum_Chl(~isnan(outlierEventNum_Chl)));
+fprintf('Ausreißer verteilen sich auf %d unterschiedliche dokumentierte Events\n', numel(uniqueOutlierEvents_Chl));
+disp(event_start_date(uniqueOutlierEvents_Chl));
+
+%% Visualisation: marked outliers based on events 
+
+figure('Name','Residuen vs. Fitted - Ausreißer nach Event-Zugehörigkeit (mit Chlorophyll)');
+fittedVals_Chl = mdl_Driver_Chl.Fitted;
+scatter(fittedVals_Chl(~outlierIdx_Chl), mdl_Driver_Chl.Residuals.Raw(~outlierIdx_Chl), 8, [0.6 0.6 0.6], 'filled', 'DisplayName','Normal'); hold on
+scatter(fittedVals_Chl(outlierIdx_Chl & ~isEventDay_all_Chl), mdl_Driver_Chl.Residuals.Raw(outlierIdx_Chl & ~isEventDay_all_Chl), 25, [0.9 0.6 0], 'filled', 'DisplayName','Outlier, no Event');
+scatter(fittedVals_Chl(outlierIdx_Chl & isEventDay_all_Chl), mdl_Driver_Chl.Residuals.Raw(outlierIdx_Chl & isEventDay_all_Chl), 25, [0.8 0 0], 'filled', 'DisplayName','Outlier, during Event');
+yline(0, '--k', 'HandleVisibility','off');
+xlabel('Fitted values'); ylabel('Residual'); grid off
+title('Residuen vs. Fitted - Ausreißer nach Event-Zugehörigkeit (mit Chlorophyll)');
+legend('Location','northwest');
+exportgraphics(gcf, 'Residuen vs. Fitted - Ausreißer nach Event-Zugehörigkeit (mit Chlorophyll).png', 'Resolution', 300);
+
+%% =======================================================================
+%
+%   FROM HERE ON, THE CORRELATION BETWEEN DRIVER AND DO IS COMPLETE
+%     NOW THE CORRELATION IS ANALYZED PER EVENT
+%
+% ========================================================================
+
+%% 18. Driver registry (adjust here if a driver is missing - e.g. comment out Chlorophyll for other stations)
+
+coefTable = mdl_Driver.Coefficients;
+getCoef = @(nm) coefTable.Estimate(strcmp(coefTable.Row, nm));
+
+driverRegistry = struct('name',{}, 'tbl',{}, 'lag',{}, 'hasModel',{}, 'coef',{});
+
+driverRegistry(end+1) = struct('name','Temperature',   'tbl',Tempraw, 'lag',lag_Temp, 'hasModel',true,  'coef',getCoef('Temperatur'));
+driverRegistry(end+1) = struct('name','Conductivity',  'tbl',Condraw, 'lag',lag_Cond, 'hasModel',true,  'coef',getCoef('Conductivity'));
+driverRegistry(end+1) = struct('name','pH',            'tbl',pHraw,   'lag',lag_pH,   'hasModel',true,  'coef',getCoef('pH'));
+driverRegistry(end+1) = struct('name','Turbidity',     'tbl',Turraw,  'lag',lag_Tur,  'hasModel',true,  'coef',getCoef('Truebung'));
+
+coefTable_Chl = mdl_Driver_Chl.Coefficients;
+getCoef_Chl = @(nm) coefTable_Chl.Estimate(strcmp(coefTable_Chl.Row, nm));
+
+driverRegistry(end+1) = struct('name','Chlorophyll',   'tbl',Chlraw,  'lag',0,        'hasModel',true, 'coef',getCoef_Chl('Chlorophyll'));
+
+nDrivers = numel(driverRegistry);
+
+%% 19. Event Catalog: characterizing each individual event (incl. driver profile)
+
+nEventsTotal = length(ev_start);
+
+n_hypoxic_days_event = NaN(nEventsTotal,1);
+n_sevHypoxic_days_event  = NaN(nEventsTotal,1);
+n_bridge_days_event  = NaN(nEventsTotal,1);
+min_DO_event = NaN(nEventsTotal,1);
+max_DO_event = NaN(nEventsTotal,1);
+
+driverAnomCols = NaN(nEventsTotal, nDrivers);
+driverContribCols = NaN(nEventsTotal, nDrivers);
+
+for i = 1:nEventsTotal
+    idx_event = ev_start(i):ev_end(i);
+    n_hypoxic_days_event(i) = sum(is_hypoxic(idx_event));
+    n_sevHypoxic_days_event(i)  = sum(is_sevHypoxic(idx_event));
+    n_bridge_days_event(i)  = sum(category(idx_event) == 4);
+    min_DO_event(i) = min(DOraw.value(idx_event));
+    max_DO_event(i) = max(DOraw.value(idx_event));
+
+    evStartDate = DOraw.time(ev_start(i));
+    evEndDate   = DOraw.time(ev_end(i));
+
+    for d = 1:nDrivers
+        drv = driverRegistry(d);
+        winStart = evStartDate - days(drv.lag);
+        winEnd   = evEndDate   - days(drv.lag);
+
+        idxWin = drv.tbl.time >= winStart & drv.tbl.time <= winEnd;
+
+        if any(idxWin)
+            driverAnomCols(i,d) = mean(drv.tbl.anomaly(idxWin), 'omitnan');
+        end
+
+        if drv.hasModel && ~isnan(driverAnomCols(i,d))
+            driverContribCols(i,d) = drv.coef * driverAnomCols(i,d);
+        end
+    end
+end
+
+range_DO_event = max_DO_event - min_DO_event;
+
+event_start_date = DOraw.time(ev_start);
+event_end_date   = DOraw.time(ev_end);
+
+EventCatalogFull = table(event_start_date, event_end_date, ev_duration, ...
+    n_hypoxic_days_event, n_sevHypoxic_days_event, n_bridge_days_event, ...
+    min_DO_event, max_DO_event, range_DO_event, ...
+    'VariableNames', {'Start Date','End Date','Total Days', ...
+    'Days below 4 mg/L','Days below 2 mg/L','Bridge Days', ...
+    'Min DO (mg/L)','Max DO (mg/L)','DO Range (mg/L)'});
+
+for d = 1:nDrivers
+    drv = driverRegistry(d);
+    EventCatalogFull.(drv.name + " Anomaly") = driverAnomCols(:,d);
+    if drv.hasModel
+        EventCatalogFull.(drv.name + " Contribution (mg/L)") = driverContribCols(:,d);
+    end
+end
+
+EventCatalogFull.("Poorly Explained by Model") = ismember((1:nEventsTotal)', uniqueOutlierEvents);
+
+EventCatalogFull = sortrows(EventCatalogFull, 'Start Date');
+
+EventCatalogFull.("Start Date") = string(EventCatalogFull.("Start Date"), "dd.MM.yyyy");
+EventCatalogFull.("End Date")   = string(EventCatalogFull.("End Date"), "dd.MM.yyyy");
+
+fprintf('=== Event Catalog - %s (%d Events) ===\n', stationName, height(EventCatalogFull));
+disp(EventCatalogFull);
+
+writetable(EventCatalogFull, "Event Catalog " + stationName + ".xlsx");
+
+%% 19.1 Dominant Driver per Event
+
+contribCols = {'Temperature Contribution (mg/L)', 'Conductivity Contribution (mg/L)', ...
+               'pH Contribution (mg/L)', 'Turbidity Contribution (mg/L)'};
+
+% with Chlorophyll add:
+contribCols{end+1} = 'Chlorophyll Contribution (mg/L)';
+
+contribMatrix = EventCatalogFull{:, contribCols};   
+
+[~, minIdx]    = min(contribMatrix, [], 2);          
+[~, maxAbsIdx] = max(abs(contribMatrix), [], 2);     
+
+driverNames = {'Temperature','Conductivity','pH','Turbidity','Chlorophyll'};
+EventCatalogFull.DominantDriver_Negative  = driverNames(minIdx)';
+EventCatalogFull.DominantDriver_Magnitude = driverNames(maxAbsIdx)';
+
+disp(EventCatalogFull(:, {'Start Date','DominantDriver_Negative','DominantDriver_Magnitude'}));
+
+%% 19.2 Aggregated driver importance across all events
+
+meanContrib    = mean(contribMatrix, 1, 'omitnan');
+meanAbsContrib = mean(abs(contribMatrix), 1, 'omitnan');
+
+summaryTable = table(driverNames', meanContrib', meanAbsContrib', ...
+    'VariableNames', {'Driver','MeanContribution_mgL','MeanAbsContribution_mgL'});
+disp(summaryTable);
+
+figure('Name','Frequency as Dominant Driver per Event');
+histogram(categorical(EventCatalogFull.DominantDriver_Negative));
+ylabel('Number of Events'); 
+title('Frequency as dominant (most negative) Driver');
+grid off
+exportgraphics(gcf, 'Frequency as Dominant Driver per Event.png', 'Resolution', 300);
+
+%% =======================================================================
+%
+%   FROM HERE ON, THE CATALOG IS COMPLETE - ALL OBJECTIVES ACHIEVED!!!
+%     HERE I WANT TO DO A MORE EXTENSIVE TREND ANALYSIS
+%        OF THE DRIVERS, FOR A BETTER DISCUSSION
+%
+% ========================================================================
+
+%% 20.  Driver-Data: Water Temperature - Trend (STL-Trendcomponente)
+
+annualLevelTrend_Temp = splitapply(@(x) mean(x,'omitnan'), longtermTrend_Temp, G_Temp);
+
+[~, tau_level_Temp, p_level_Temp, sig_level_Temp] = mannKendall(annualLevelTrend_Temp(validYr_Temp));
+slope_level_Temp = sensSlope(annualLevelTrend_Temp(validYr_Temp));
+fprintf('Temperatur Niveau-Trend: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', tau_level_Temp, p_level_Temp, sig_level_Temp, slope_level_Temp);
+
+x_level_Temp = annualLevelTrend_Temp(validYr_Temp); n_level_Temp = numel(x_level_Temp); xbar_level_Temp = mean(x_level_Temp);
+r1_level_Temp = sum((x_level_Temp(1:end-1)-xbar_level_Temp).*(x_level_Temp(2:end)-xbar_level_Temp)) / sum((x_level_Temp-xbar_level_Temp).^2);
+fprintf('Temperatur Niveau-Trend r1 = %.3f (Grenze ±%.3f)\n', r1_level_Temp, 1.96/sqrt(n_level_Temp));
+[~, ~, p_level_Temp_c, sig_level_Temp_c, neff_level_Temp] = mannKendallCorrected(x_level_Temp, r1_level_Temp);
+fprintf('Temperatur Niveau-Trend korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_level_Temp_c, sig_level_Temp_c, neff_level_Temp, n_level_Temp);
+
+figure('Name','Annual Mean STL-Trend - Wassertemperatur');
+plot(yearList_Temp(validYr_Temp), annualLevelTrend_Temp(validYr_Temp), '-o', 'Color',[0.5 0.5 0.5], 'DisplayName','Annual Mean STL-Trend');
+hold on
+b_level_Temp = median(annualLevelTrend_Temp(validYr_Temp)) - slope_level_Temp*median(yearList_Temp(validYr_Temp));
+plot(yearList_Temp(validYr_Temp), slope_level_Temp*yearList_Temp(validYr_Temp) + b_level_Temp, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Sen-Slope = %.4f °C/Year, p = %.3f', slope_level_Temp, p_level_Temp));
+xlabel('Year'); ylabel('STL-Trend Component [°C]');
+title('Annual Mean STL-Trend - Watertemperature');
+legend('Location','northwest'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend - Wassertemperatur.png', 'Resolution', 300);
+
+%% Driver-Data: Water Temperature - Breakpoint Analysis Niveau-Trend
+
+[bLevelTemp, sseLevelTemp] = findChangepointLinear(annualLevelTrend_Temp(validYr_Temp), 3);
+yearsValid_LevelTemp = yearList_Temp(validYr_Temp);
+breakYearLevelTemp = yearsValid_LevelTemp(bLevelTemp);
+fprintf('Bruchpunkt Niveau-Trend Wassertemperatur: %d\n', breakYearLevelTemp);
+
+phaseLevelTemp1 = annualLevelTrend_Temp(validYr_Temp);
+phaseLevelTemp1 = phaseLevelTemp1(yearsValid_LevelTemp <  breakYearLevelTemp);
+phaseLevelTemp2 = annualLevelTrend_Temp(validYr_Temp);
+phaseLevelTemp2 = phaseLevelTemp2(yearsValid_LevelTemp >= breakYearLevelTemp);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseLevelTemp1), numel(phaseLevelTemp2));
+
+[~, tauLevelTemp1, pLevelTemp1, sigLevelTemp1] = mannKendall(phaseLevelTemp1); 
+slopeLevelTemp1 = sensSlope(phaseLevelTemp1);
+[~, tauLevelTemp2, pLevelTemp2, sigLevelTemp2] = mannKendall(phaseLevelTemp2); 
+slopeLevelTemp2 = sensSlope(phaseLevelTemp2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', ...
+    breakYearLevelTemp, tauLevelTemp1, pLevelTemp1, sigLevelTemp1, slopeLevelTemp1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', ...
+    breakYearLevelTemp, tauLevelTemp2, pLevelTemp2, sigLevelTemp2, slopeLevelTemp2);
+
+n1 = numel(phaseLevelTemp1); xbar1 = mean(phaseLevelTemp1);
+r1_LevelTemp1 = sum((phaseLevelTemp1(1:end-1)-xbar1).*(phaseLevelTemp1(2:end)-xbar1)) / sum((phaseLevelTemp1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_LevelTemp1, 1.96/sqrt(n1));
+
+n2 = numel(phaseLevelTemp2); xbar2 = mean(phaseLevelTemp2);
+r1_LevelTemp2 = sum((phaseLevelTemp2(1:end-1)-xbar2).*(phaseLevelTemp2(2:end)-xbar2)) / sum((phaseLevelTemp2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_LevelTemp2, 1.96/sqrt(n2));
+
+[~, ~, pLevelTemp1c, sigLevelTemp1c, neffLevelTemp1] = mannKendallCorrected(phaseLevelTemp1, r1_LevelTemp1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', ...
+    pLevelTemp1c, sigLevelTemp1c, neffLevelTemp1, numel(phaseLevelTemp1));
+
+[~, ~, pLevelTemp2c, sigLevelTemp2c, neffLevelTemp2] = mannKendallCorrected(phaseLevelTemp2, r1_LevelTemp2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', ...
+    pLevelTemp2c, sigLevelTemp2c, neffLevelTemp2, numel(phaseLevelTemp2));
+
+% Plot
+
+t1 = yearsValid_LevelTemp(yearsValid_LevelTemp <  breakYearLevelTemp);
+t2 = yearsValid_LevelTemp(yearsValid_LevelTemp >= breakYearLevelTemp);
+
+figure("Name","Watertemperature Level Trend with Breakpoint");
+plot(yearsValid_LevelTemp, annualLevelTrend_Temp(validYr_Temp), 'o-', "Color",[0 0 0],'LineWidth',1.2, "DisplayName","Annual Mean STL Trend");
+hold on
+
+
+b1 = median(phaseLevelTemp1) - slopeLevelTemp1*median(t1);
+plot(t1, slopeLevelTemp1*t1 + b1, "-", "LineWidth", 2,'Color','red', ...
+    "DisplayName", sprintf("Phase 1: Sen=%.4f °C/Year, p=%.3f", slopeLevelTemp1, pLevelTemp1));
+
+b2 = median(phaseLevelTemp2) - slopeLevelTemp2*median(t2);
+plot(t2, slopeLevelTemp2*t2 + b2, "-", "LineWidth", 2, 'Color','red',...
+    "DisplayName", sprintf("Phase 2: Sen=%.4f °C/Year, p=%.3f", slopeLevelTemp2, pLevelTemp2));
+
+xline(breakYearLevelTemp, ":k", "HandleVisibility","off");
+
+grid off
+xlabel("Year"); ylabel("Watertemperature [°C]");
+title("Watertemperature Level Trend with Breakpoint");
+legend("Location","northwest");
+exportgraphics(gcf, 'Watertemperature Level Trend with Breakpoint.png', 'Resolution', 300);
+
+%% Driver-Data: Conductivity - Trend (STL-Trendcomponente)
+
+annualLevelTrend_Cond = splitapply(@(x) median(x,'omitnan'), Condraw.value, G_Cond);
+
+[~, tau_level_Cond, p_level_Cond, sig_level_Cond] = mannKendall(annualLevelTrend_Cond(validYr_Cond));
+slope_level_Cond = sensSlope(annualLevelTrend_Cond(validYr_Cond));
+fprintf('Conductivity Niveau-Trend: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µS/cm/Jahr\n', tau_level_Cond, p_level_Cond, sig_level_Cond, slope_level_Cond);
+
+x_level_Cond = annualLevelTrend_Cond(validYr_Cond); n_level_Cond = numel(x_level_Cond); xbar_level_Cond = mean(x_level_Cond);
+r1_level_Cond = sum((x_level_Cond(1:end-1)-xbar_level_Cond).*(x_level_Cond(2:end)-xbar_level_Cond)) / sum((x_level_Cond-xbar_level_Cond).^2);
+fprintf('Conductivity Niveau-Trend r1 = %.3f (Grenze ±%.3f)\n', r1_level_Cond, 1.96/sqrt(n_level_Cond));
+[~, ~, p_level_Cond_c, sig_level_Cond_c, neff_level_Cond] = mannKendallCorrected(x_level_Cond, r1_level_Cond);
+fprintf('Conductivity Niveau-Trend korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_level_Cond_c, sig_level_Cond_c, neff_level_Cond, n_level_Cond);
+
+figure('Name','Annual Mean STL-Trend - Conductivity');
+plot(yearList_Cond(validYr_Cond), annualLevelTrend_Cond(validYr_Cond), '-o', 'Color',[0.5 0.5 0.5], 'DisplayName','Annual Mean STL-Trend');
+hold on
+b_level_Cond = median(annualLevelTrend_Cond(validYr_Cond)) - slope_level_Cond*median(yearList_Cond(validYr_Cond));
+plot(yearList_Cond(validYr_Cond), slope_level_Cond*yearList_Cond(validYr_Cond) + b_level_Cond, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Sen-Slope = %.4f µS/cm/Year, p = %.3f', slope_level_Cond, p_level_Cond_c));
+xlabel('Year'); ylabel('STL-Trend Component [µS/cm]');
+title('Annual Mean STL-Trend - Conductivity');
+legend('Location','northwest'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend - Conductivity.png', 'Resolution', 300);
+
+[bLevelCond, sseLevelCond] = findChangepointLinear(annualLevelTrend_Cond(validYr_Cond), 3);
+yearsValid_LevelCond = yearList_Cond(validYr_Cond);
+breakYearLevelCond = yearsValid_LevelCond(bLevelCond);
+fprintf('Bruchpunkt Niveau-Trend Conducticity: %d\n', breakYearLevelCond);
+
+phaseLevelCond1 = annualLevelTrend_Cond(validYr_Cond);
+phaseLevelCond1 = phaseLevelCond1(yearsValid_LevelCond <  breakYearLevelCond);
+phaseLevelCond2 = annualLevelTrend_Cond(validYr_Cond);
+phaseLevelCond2 = phaseLevelCond2(yearsValid_LevelCond >= breakYearLevelCond);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseLevelCond1), numel(phaseLevelCond2));
+
+[~, tauLevelCond1, pLevelCond1, sigLevelCond1] = mannKendall(phaseLevelCond1); 
+slopeLevelCond1 = sensSlope(phaseLevelCond1);
+[~, tauLevelCond2, pLevelCond2, sigLevelCond2] = mannKendall(phaseLevelCond2); 
+slopeLevelCond2 = sensSlope(phaseLevelCond2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', ...
+    breakYearLevelCond, tauLevelCond1, pLevelCond1, sigLevelCond1, slopeLevelCond1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f °C/Jahr\n', ...
+    breakYearLevelCond, tauLevelCond2, pLevelCond2, sigLevelCond2, slopeLevelCond2);
+
+n1 = numel(phaseLevelCond1); xbar1 = mean(phaseLevelCond1);
+r1_LevelCond1 = sum((phaseLevelCond1(1:end-1)-xbar1).*(phaseLevelCond1(2:end)-xbar1)) / sum((phaseLevelCond1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_LevelCond1, 1.96/sqrt(n1));
+
+n2 = numel(phaseLevelCond2); xbar2 = mean(phaseLevelCond2);
+r1_LevelCond2 = sum((phaseLevelCond2(1:end-1)-xbar2).*(phaseLevelCond2(2:end)-xbar2)) / sum((phaseLevelCond2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_LevelCond2, 1.96/sqrt(n2));
+
+[~, ~, pLevelCond1c, sigLevelCond1c, neffLevelCond1] = mannKendallCorrected(phaseLevelCond1, r1_LevelCond1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', ...
+    pLevelCond1c, sigLevelCond1c, neffLevelCond1, numel(phaseLevelCond1));
+
+[~, ~, pLevelCond2c, sigLevelCond2c, neffLevelCond2] = mannKendallCorrected(phaseLevelCond2, r1_LevelCond2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', ...
+    pLevelCond2c, sigLevelCond2c, neffLevelCond2, numel(phaseLevelCond2));
+
+% Plot
+
+t1 = yearsValid_LevelCond(yearsValid_LevelCond <  breakYearLevelCond);
+t2 = yearsValid_LevelCond(yearsValid_LevelCond >= breakYearLevelCond);
+
+figure("Name","Conductivity Level Trend with Breakpoint");
+plot(yearsValid_LevelCond, annualLevelTrend_Cond(validYr_Cond), 'o-', "Color",[0 0 0],'LineWidth', 1.2, "DisplayName","Annual Median");
+hold on
+
+
+b1 = median(phaseLevelCond1) - slopeLevelCond1*median(t1);
+plot(t1, slopeLevelCond1*t1 + b1, "r-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 1: Sen=%.4f µS/cm/Year, p=%.3f", slopeLevelCond1, pLevelCond1));
+
+b2 = median(phaseLevelCond2) - slopeLevelCond2*median(t2);
+plot(t2, slopeLevelCond2*t2 + b2, "r-", "LineWidth", 2, ...
+    "DisplayName", sprintf("Phase 2: Sen=%.4f µS/cm/Year, p=%.3f", slopeLevelCond2, pLevelCond2));
+
+xline(breakYearLevelCond, ":k", "HandleVisibility","off");
+
+grid off
+xlabel("Year"); ylabel("Conductivity [µS/cm]");
+title("Conductivity Median Trend with Breakpoint");
+legend("Location","northwest");
+exportgraphics(gcf, 'Annual Median Conductivity Breakpoint.png', 'Resolution', 300);
+%% Driver-Data: pH - Trend (STL-Trendcomponente)
+
+annualLevelTrend_pH = splitapply(@(x) mean(x,'omitnan'), longtermTrend_pH, G_pH);
+
+[~, tau_level_pH, p_level_pH, sig_level_pH] = mannKendall(annualLevelTrend_pH(validYr_pH));
+slope_level_pH = sensSlope(annualLevelTrend_pH(validYr_pH));
+fprintf('pH Niveau-Trend: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f /Jahr\n', tau_level_pH, p_level_pH, sig_level_pH, slope_level_pH);
+
+x_level_pH = annualLevelTrend_pH(validYr_pH); n_level_pH = numel(x_level_pH); xbar_level_pH = mean(x_level_pH);
+r1_level_pH = sum((x_level_pH(1:end-1)-xbar_level_pH).*(x_level_pH(2:end)-xbar_level_pH)) / sum((x_level_pH-xbar_level_pH).^2);
+fprintf('pH Niveau-Trend r1 = %.3f (Grenze ±%.3f)\n', r1_level_pH, 1.96/sqrt(n_level_pH));
+[~, ~, p_level_pH_c, sig_level_pH_c, neff_level_pH] = mannKendallCorrected(x_level_pH, r1_level_pH);
+fprintf('pH Niveau-Trend korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_level_pH_c, sig_level_pH_c, neff_level_pH, n_level_pH);
+
+figure('Name','Annual Mean STL-Trend - pH');
+plot(yearList_pH(validYr_pH), annualLevelTrend_pH(validYr_pH), '-o', 'Color',[0.5 0.5 0.5], 'DisplayName','Annual Mean STL-Trend');
+hold on
+b_level_pH = median(annualLevelTrend_pH(validYr_pH)) - slope_level_pH*median(yearList_pH(validYr_pH));
+plot(yearList_pH(validYr_pH), slope_level_pH*yearList_pH(validYr_pH) + b_level_pH, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Sen-Slope = %.4f /Year, p = %.3f', slope_level_pH, p_level_pH));
+xlabel('Year'); ylabel('STL-Trend Component [pH]');
+title('Annual Mean STL-Trend - pH');
+legend('Location','northwest'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend - pH.png', 'Resolution', 300);
+
+%% Driver-Data: pH - Breakpoint Analysis Niveau-Trend
+
+[bLevelpH, sseLevelpH] = findChangepointLinear(annualLevelTrend_pH(validYr_pH), 3);
+yearsValid_LevelpH = yearList_pH(validYr_pH);
+breakYearLevelpH = yearsValid_LevelpH(bLevelpH);
+fprintf('Bruchpunkt (pH Niveau-Trend): %d\n', breakYearLevelpH);
+
+phaseLevelpH1 = annualLevelTrend_pH(validYr_pH & yearList_pH <  breakYearLevelpH);
+phaseLevelpH2 = annualLevelTrend_pH(validYr_pH & yearList_pH >= breakYearLevelpH);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseLevelpH1), numel(phaseLevelpH2));
+
+[~, tauLevelpH1, pLevelpH1, sigLevelpH1] = mannKendall(phaseLevelpH1); slopeLevelpH1 = sensSlope(phaseLevelpH1);
+[~, tauLevelpH2, pLevelpH2, sigLevelpH2] = mannKendall(phaseLevelpH2); slopeLevelpH2 = sensSlope(phaseLevelpH2);
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f /Jahr\n', breakYearLevelpH, tauLevelpH1,pLevelpH1,sigLevelpH1,slopeLevelpH1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f /Jahr\n', breakYearLevelpH, tauLevelpH2,pLevelpH2,sigLevelpH2,slopeLevelpH2);
+
+n1 = numel(phaseLevelpH1); xbar1 = mean(phaseLevelpH1);
+r1_levelpH1 = sum((phaseLevelpH1(1:end-1)-xbar1).*(phaseLevelpH1(2:end)-xbar1)) / sum((phaseLevelpH1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_levelpH1, 1.96/sqrt(n1));
+n2 = numel(phaseLevelpH2); xbar2 = mean(phaseLevelpH2);
+r1_levelpH2 = sum((phaseLevelpH2(1:end-1)-xbar2).*(phaseLevelpH2(2:end)-xbar2)) / sum((phaseLevelpH2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_levelpH2, 1.96/sqrt(n2));
+
+[~, ~, pLevelpH1c, sigLevelpH1c, neffLevelpH1] = mannKendallCorrected(phaseLevelpH1, r1_levelpH1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pLevelpH1c, sigLevelpH1c, neffLevelpH1, numel(phaseLevelpH1));
+[~, ~, pLevelpH2c, sigLevelpH2c, neffLevelpH2] = mannKendallCorrected(phaseLevelpH2, r1_levelpH2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pLevelpH2c, sigLevelpH2c, neffLevelpH2, numel(phaseLevelpH2));
+
+t1 = yearsValid_LevelpH(yearsValid_LevelpH <  breakYearLevelpH);
+t2 = yearsValid_LevelpH(yearsValid_LevelpH >= breakYearLevelpH);
+figure('Name','Annual Mean STL-Trend with Breakpoint - pH');
+plot(yearsValid_LevelpH, annualLevelTrend_pH(validYr_pH), '-o', 'Color',[0 0 0],'LineWidth', 1.2, 'DisplayName','Annual Mean STL-Trend');
+hold on
+b1 = median(phaseLevelpH1) - slopeLevelpH1*median(t1);
+plot(t1, slopeLevelpH1*t1 + b1, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 1: Sen=%.4f /Year, p=%.3f', slopeLevelpH1, pLevelpH1c));
+b2 = median(phaseLevelpH2) - slopeLevelpH2*median(t2);
+plot(t2, slopeLevelpH2*t2 + b2, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 2: Sen=%.4f /Year, p=%.3f', slopeLevelpH2, pLevelpH2c));
+xline(breakYearLevelpH, '--k', 'HandleVisibility','off');
+xlabel('Year'); ylabel('pH');
+title('Annual Mean STL-Trend with Breakpoint - pH');
+legend('Location','northwest'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend with Breakpoint - pH.png', 'Resolution', 300);
+
+%% Driver-Data: Chlorophyll - Trend (STL-Trendcomponente)
+
+annualLevelTrend_Chl = splitapply(@(x) mean(x,'omitnan'), longtermTrend_Chl, G_Chl);
+
+[~, tau_level_Chl, p_level_Chl, sig_level_Chl] = mannKendall(annualLevelTrend_Chl(validYr_Chl));
+slope_level_Chl = sensSlope(annualLevelTrend_Chl(validYr_Chl));
+fprintf('Chlorophyll Niveau-Trend: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f µg/L/Jahr\n', tau_level_Chl, p_level_Chl, sig_level_Chl, slope_level_Chl);
+
+x_level_Chl = annualLevelTrend_Chl(validYr_Chl); n_level_Chl = numel(x_level_Chl); xbar_level_Chl = mean(x_level_Chl);
+r1_level_Chl = sum((x_level_Chl(1:end-1)-xbar_level_Chl).*(x_level_Chl(2:end)-xbar_level_Chl)) / sum((x_level_Chl-xbar_level_Chl).^2);
+fprintf('Chlorophyll Niveau-Trend r1 = %.3f (Grenze ±%.3f)\n', r1_level_Chl, 1.96/sqrt(n_level_Chl));
+[~, ~, p_level_Chl_c, sig_level_Chl_c, neff_level_Chl] = mannKendallCorrected(x_level_Chl, r1_level_Chl);
+fprintf('Chlorophyll Niveau-Trend korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_level_Chl_c, sig_level_Chl_c, neff_level_Chl, n_level_Chl);
+
+figure('Name','Annual Mean STL-Trend - Chlorophyll');
+plot(yearList_Chl(validYr_Chl), annualLevelTrend_Chl(validYr_Chl), '-o', 'Color',[0.5 0.5 0.5], 'DisplayName','Annual Mean STL-Trend');
+hold on
+b_level_Chl = median(annualLevelTrend_Chl(validYr_Chl)) - slope_level_Chl*median(yearList_Chl(validYr_Chl));
+plot(yearList_Chl(validYr_Chl), slope_level_Chl*yearList_Chl(validYr_Chl) + b_level_Chl, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Sen-Slope = %.4f µg/L/Year, p = %.3f', slope_level_Chl, p_level_Chl_c));
+xlabel('Year'); ylabel('STL-Trend Component [µg/L]');
+title('Annual Mean STL-Trend - Chlorophyll');
+legend('Location','northwest'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend - Chlorophyll.png', 'Resolution', 300);
+
+%% Driver-Data: Chloro- Breakpoint Analysis Niveau-Trend
+
+[bLevelChl, sseLevelChl] = findChangepointLinear(annualLevelTrend_Chl(validYr_Chl), 3);
+yearsValid_LevelChl = yearList_Chl(validYr_Chl);
+breakYearLevelChl = yearsValid_LevelChl(bLevelChl);
+fprintf('Bruchpunkt (Chloro Niveau-Trend): %d\n', breakYearLevelChl);
+
+phaseLevelChl1 = annualLevelTrend_Chl(validYr_Chl & yearList_Chl <  breakYearLevelChl);
+phaseLevelChl2 = annualLevelTrend_Chl(validYr_Chl & yearList_Chl >= breakYearLevelChl);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseLevelChl1), numel(phaseLevelChl2));
+
+[~, tauLevelChl1, pLevelChl1, sigLevelChl1] = mannKendall(phaseLevelChl1); slopeLevelChl1 = sensSlope(phaseLevelChl1);
+[~, tauLevelChl2, pLevelChl2, sigLevelChl2] = mannKendall(phaseLevelChl2); slopeLevelChl2 = sensSlope(phaseLevelChl2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', breakYearLevelChl, tauLevelChl1,pLevelChl1,sigLevelChl1,slopeLevelChl1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', breakYearLevelChl, tauLevelChl2,pLevelChl2,sigLevelChl2,slopeLevelChl2);
+
+n1 = numel(phaseLevelChl1); xbar1 = mean(phaseLevelChl1);
+r1_levelChl1 = sum((phaseLevelChl1(1:end-1)-xbar1).*(phaseLevelChl1(2:end)-xbar1)) / sum((phaseLevelChl1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_levelChl1, 1.96/sqrt(n1));
+
+n2 = numel(phaseLevelChl2); xbar2 = mean(phaseLevelChl2);
+r1_levelChl2 = sum((phaseLevelChl2(1:end-1)-xbar2).*(phaseLevelChl2(2:end)-xbar2)) / sum((phaseLevelChl2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_levelChl2, 1.96/sqrt(n2));
+
+[~, ~, pLevelChl1c, sigLevelChl1c, neffLevelChl1] = mannKendallCorrected(phaseLevelChl1, r1_levelChl1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pLevelChl1c, sigLevelChl1c, neffLevelChl1, numel(phaseLevelChl1));
+
+[~, ~, pLevelChl2c, sigLevelChl2c, neffLevelChl2] = mannKendallCorrected(phaseLevelChl2, r1_levelChl2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pLevelChl2c, sigLevelChl2c, neffLevelChl2, numel(phaseLevelChl2));
+
+t1 = yearsValid_LevelChl(yearsValid_LevelChl <  breakYearLevelChl);
+t2 = yearsValid_LevelChl(yearsValid_LevelChl >= breakYearLevelChl);
+
+figure('Name','Annual Mean STL-Trend with Breakpoint - Chlorophyll');
+plot(yearsValid_LevelChl, annualLevelTrend_Chl(validYr_Chl), '-o', 'Color',[0 0 0],'LineWidth', 1.2, 'DisplayName','Annual Mean STL-Trend');
+hold on
+
+b1 = median(phaseLevelChl1) - slopeLevelChl1*median(t1);
+plot(t1, slopeLevelChl1*t1 + b1, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 1: Sen=%.4f µg/L/Year, p=%.3f', slopeLevelChl1, pLevelChl1));
+
+b2 = median(phaseLevelChl2) - slopeLevelChl2*median(t2);
+plot(t2, slopeLevelChl2*t2 + b2, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 2: Sen=%.4f µg/L/Year, p=%.3f', slopeLevelChl2, pLevelChl2));
+
+xline(breakYearLevelChl, '--k', 'HandleVisibility','off');
+xlabel('Year'); ylabel('Chlorophyll [µg/L]');
+title('Annual Mean STL-Trend with Breakpoint - Chloropohyll');
+legend('Location','southeast'); grid off
+exportgraphics(gcf, 'Annual Mean STL-Trend with Breakpoint - Chloropohyll.png', 'Resolution', 300);
+
+%% Driver-Data: Turbidity - Trend (STL-Trendcomponente)
+
+annualLevelTrend_Tur = splitapply(@(x) median(x,'omitnan'), Turraw.value, G_Tur);
+
+[~, tau_level_Tur, p_level_Tur, sig_level_Tur] = mannKendall(annualLevelTrend_Tur(validYr_Tur));
+slope_level_Tur = sensSlope(annualLevelTrend_Tur(validYr_Tur));
+fprintf('Trübung Niveau-Trend: tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', tau_level_Tur, p_level_Tur, sig_level_Tur, slope_level_Tur);
+
+x_level_Tur = annualLevelTrend_Tur(validYr_Tur); n_level_Tur = numel(x_level_Tur); xbar_level_Tur = mean(x_level_Tur);
+r1_level_Tur = sum((x_level_Tur(1:end-1)-xbar_level_Tur).*(x_level_Tur(2:end)-xbar_level_Tur)) / sum((x_level_Tur-xbar_level_Tur).^2);
+fprintf('Trübung Niveau-Trend r1 = %.3f (Grenze ±%.3f)\n', r1_level_Tur, 1.96/sqrt(n_level_Tur));
+[~, ~, p_level_Tur_c, sig_level_Tur_c, neff_level_Tur] = mannKendallCorrected(x_level_Tur, r1_level_Tur);
+fprintf('Trübung Niveau-Trend korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', p_level_Tur_c, sig_level_Tur_c, neff_level_Tur, n_level_Tur);
+
+figure('Name','Annual Mean STL-Trend - Turbidity');
+plot(yearList_Tur(validYr_Tur), annualLevelTrend_Tur(validYr_Tur), '-o', 'Color',[0.5 0.5 0.5], 'DisplayName','Annual Mean STL-Trend');
+hold on
+b_level_Tur = median(annualLevelTrend_Tur(validYr_Tur)) - slope_level_Tur*median(yearList_Tur(validYr_Tur));
+plot(yearList_Tur(validYr_Tur), slope_level_Tur*yearList_Tur(validYr_Tur) + b_level_Tur, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Sen-Slope = %.4f FNU/Yaer, p = %.3f', slope_level_Tur, p_level_Tur_c));
+xlabel('Year'); ylabel('Turbidity [FNU]');
+title('Annual Mean STL-Trend - Turbidity');
+legend('Location','best'); grid off
+exportgraphics(gcf, 'Annual Median Turbidity.png', 'Resolution', 300);
+
+%% Driver-Data: Turbidity - Breakpoint Analysis Niveau-Trend
+
+[bLevelTur, sseLevelTur] = findChangepointLinear(annualLevelTrend_Tur(validYr_Tur), 3);
+yearsValid_LevelTur = yearList_Tur(validYr_Tur);
+breakYearLevelTur = yearsValid_LevelTur(bLevelTur);
+fprintf('Bruchpunkt (Trübung Niveau-Trend): %d\n', breakYearLevelTur);
+
+phaseLevelTur1 = annualLevelTrend_Tur(validYr_Tur & yearList_Tur <  breakYearLevelTur);
+phaseLevelTur2 = annualLevelTrend_Tur(validYr_Tur & yearList_Tur >= breakYearLevelTur);
+fprintf('Phase 1: n=%d, Phase 2: n=%d\n', numel(phaseLevelTur1), numel(phaseLevelTur2));
+
+[~, tauLevelTur1, pLevelTur1, sigLevelTur1] = mannKendall(phaseLevelTur1); slopeLevelTur1 = sensSlope(phaseLevelTur1);
+[~, tauLevelTur2, pLevelTur2, sigLevelTur2] = mannKendall(phaseLevelTur2); slopeLevelTur2 = sensSlope(phaseLevelTur2);
+
+fprintf('Phase 1 (vor %d): tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', breakYearLevelTur, tauLevelTur1,pLevelTur1,sigLevelTur1,slopeLevelTur1);
+fprintf('Phase 2 (ab %d):  tau=%.3f, p=%.4f, sig=%d, Sen-Slope=%.4f FNU/Jahr\n', breakYearLevelTur, tauLevelTur2,pLevelTur2,sigLevelTur2,slopeLevelTur2);
+
+n1 = numel(phaseLevelTur1); xbar1 = mean(phaseLevelTur1);
+r1_levelTur1 = sum((phaseLevelTur1(1:end-1)-xbar1).*(phaseLevelTur1(2:end)-xbar1)) / sum((phaseLevelTur1-xbar1).^2);
+fprintf('Phase 1 r1 = %.3f (Grenze ±%.3f)\n', r1_levelTur1, 1.96/sqrt(n1));
+
+n2 = numel(phaseLevelTur2); xbar2 = mean(phaseLevelTur2);
+r1_levelTur2 = sum((phaseLevelTur2(1:end-1)-xbar2).*(phaseLevelTur2(2:end)-xbar2)) / sum((phaseLevelTur2-xbar2).^2);
+fprintf('Phase 2 r1 = %.3f (Grenze ±%.3f)\n', r1_levelTur2, 1.96/sqrt(n2));
+
+[~, ~, pLevelTur1c, sigLevelTur1c, neffLevelTur1] = mannKendallCorrected(phaseLevelTur1, r1_levelTur1);
+fprintf('Phase 1 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pLevelTur1c, sigLevelTur1c, neffLevelTur1, numel(phaseLevelTur1));
+
+[~, ~, pLevelTur2c, sigLevelTur2c, neffLevelTur2] = mannKendallCorrected(phaseLevelTur2, r1_levelTur2);
+fprintf('Phase 2 korrigiert: p=%.4f, sig=%d, n_eff=%.1f (statt n=%d)\n', pLevelTur2c, sigLevelTur2c, neffLevelTur2, numel(phaseLevelTur2));
+
+% Plot
+
+t1 = yearsValid_LevelTur(yearsValid_LevelTur <  breakYearLevelTur);
+t2 = yearsValid_LevelTur(yearsValid_LevelTur >= breakYearLevelTur);
+
+figure('Name','Annual Mean STL-Trend mit Bruchstelle - Trübung');
+plot(yearsValid_LevelTur, annualLevelTrend_Tur(validYr_Tur), '-o', 'Color',[0 0 0], 'LineWidth',1.2, 'DisplayName','Annual Mean STL-Trend');
+hold on
+
+b1 = median(phaseLevelTur1) - slopeLevelTur1*median(t1);
+plot(t1, slopeLevelTur1*t1 + b1, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 1: Sen=%.4f FNU/Year, p=%.3f', slopeLevelTur1, pLevelTur1));
+
+b2 = median(phaseLevelTur2) - slopeLevelTur2*median(t2);
+plot(t2, slopeLevelTur2*t2 + b2, 'r-', 'LineWidth', 2, ...
+    'DisplayName', sprintf('Phase 2: Sen=%.4f FNU/Year, p=%.3f', slopeLevelTur2, pLevelTur2c));
+
+xline(breakYearLevelTur, '--k', 'HandleVisibility','off');
+xlabel('Year'); ylabel('Turbidity [FNU]');
+title('Annual Mean STL-Trend mit Bruchstelle - Trübung');
+legend('Location','best'); grid off
+exportgraphics(gcf, 'Annual Median mit Bruchstelle - Trübung.png', 'Resolution', 300);
+
+%% 21. Last Check: pH as Proxy for Chlorophyll?
+
+pHT  = pHraw(:,{'time','anomaly'});
+pHT.Properties.VariableNames{'anomaly'} = 'pH_anom';
+
+ChlT = Chlraw(:,{'time','anomaly'});
+ChlT.Properties.VariableNames{'anomaly'} = 'Chl_anom';
+
+pHChl = innerjoin(pHT, ChlT, 'Keys','time');
+pHChl = rmmissing(pHChl);
+
+fprintf('Überlappender Zeitraum: %s bis %s (n=%d Tage)\n', ...
+    string(pHChl.time(1)), string(pHChl.time(end)), height(pHChl));
+
+[r0, p0] = corr(pHChl.pH_anom, pHChl.Chl_anom);
+fprintf('Nullzeit-Korrelation pH vs. Chlorophyll: r=%.3f, R²=%.3f, p=%.4f\n', r0, r0^2, p0);
+
+maxLag = 14;   
+lags = -maxLag:maxLag;
+rLag = NaN(size(lags));
+
+for i = 1:length(lags)
+    L = lags(i);
+    if L >= 0
+        x = pHChl.pH_anom(1:end-L);
+        y = pHChl.Chl_anom(1+L:end);
+    else
+        x = pHChl.pH_anom(1-L:end);
+        y = pHChl.Chl_anom(1:end+L);
+    end
+    if length(x) > 30   
+        rLag(i) = corr(x, y, 'rows','complete');
+    end
+end
+
+[bestR, idx] = max(abs(rLag));
+bestLag = lags(idx);
+
+if bestLag >= 0
+    leadStr = "pH";
+else
+    leadStr = "Chlorophyll";
+end
+
+fprintf('Bester Lag: %d Tage, r=%.3f (%s führt)\n', bestLag, rLag(idx), leadStr);
+
+figure("Name","Lag-Kreuzkorrelation pH vs. Chlorophyll");
+plot(lags, rLag, 'o-');
+xline(0, ':k');
+grid off
+xlabel("Lag [Tage] (positiv = pH führt)"); ylabel("Korrelationskoeffizient r");
+title("Kreuzkorrelation pH-Anomalie vs. Chlorophyll-Anomalie");
+
+% Scatterplot 
+
+figure("Name","pH vs. Chlorophyll Anomalie (Scatter)");
+scatter(pHChl.pH_anom, pHChl.Chl_anom, 15, 'filled', 'MarkerFaceAlpha', 0.4);
+grid off
+xlabel("pH Anomaly"); ylabel("Chlorophyll Anomaly");
+title(sprintf("pH vs. Chlorophyll Anomaly (r=%.3f, R²=%.3f)", r0, r0^2));
+
+
+%% =======================================================================
+%
+%                            ALL DONE
+%                    JUHUUUU!!!!!!!!!!!!!!!!
+%
+% ========================================================================
+%% Functions 
+
+
+% Mann-Kendall
+function [S, tau, p, H] = mannKendall(x, alpha)
+if nargin < 2, alpha = 0.05; end
+    x = x(:); n = length(x);
+    S = 0;
+for k = 1:n-1
+        S = S + sum(sign(x(k+1:n) - x(k)));
+end
+    [~,~,ic] = unique(x);
+    g = histcounts(ic, 1:max(ic)+1);
+    g = g(g > 1);
+    varS = n*(n-1)*(2*n+5)/18 - sum(g.*(g-1).*(2*g+5))/18;
+if S > 0
+        Z = (S-1)/sqrt(varS);
+elseif S < 0
+        Z = (S+1)/sqrt(varS);
+else
+        Z = 0;
+end
+    p = 1 - erf(abs(Z)/sqrt(2));   % zweiseitiger p-Wert
+    H = p < alpha;                  % 1 = signifikanter Trend
+    tau = S / (n*(n-1)/2);
+end
+
+
+% Sen's Slope (robuste Trendsteigung, mg/L pro Jahr)
+function slope = sensSlope(x)
+    x = x(:).';   % erzwingt Zeilenvektor
+    n = length(x);
+    slopes = [];
+for k = 1:n-1
+        slopes = [slopes, (x(k+1:n) - x(k)) ./ (1:(n-k))];
+end
+    slope = median(slopes);
+end
+
+
+% Find Change Point
+function [breakIdx, bestSSE] = findChangepointLinear(x, minSegLen)
+    if nargin < 2
+        minSegLen = 3;
+    end
+    x = x(:);
+    n = length(x);
+    t = (1:n)';
+
+    bestSSE = Inf;
+    breakIdx = NaN;
+
+    for k = minSegLen : (n - minSegLen)
+        seg1_t = t(1:k);       seg1_x = x(1:k);
+        seg2_t = t(k+1:end);   seg2_x = x(k+1:end);
+
+        p1 = polyfit(seg1_t, seg1_x, 1);
+        p2 = polyfit(seg2_t, seg2_x, 1);
+
+        resid1 = seg1_x - polyval(p1, seg1_t);
+        resid2 = seg2_x - polyval(p2, seg2_t);
+
+        sse = sum(resid1.^2) + sum(resid2.^2);
+
+        if sse < bestSSE
+            bestSSE = sse;
+            breakIdx = k + 1;
+        end
+    end
+end
+
+
+% Mann-Kendall Corrected
+function [S, tau, p, H, neff] = mannKendallCorrected(x, r1, alpha)
+    if nargin < 3, alpha = 0.05; end
+    x = x(:); n = length(x);
+    S = 0;
+    for k = 1:n-1
+        S = S + sum(sign(x(k+1:n) - x(k)));
+    end
+    [~,~,ic] = unique(x);
+    g = histcounts(ic, 1:max(ic)+1);
+    g = g(g > 1);
+
+    % Klassische (naive) Varianz unter Unabhängigkeitsannahme
+    varS_naive = n*(n-1)*(2*n+5)/18 - sum(g.*(g-1).*(2*g+5))/18;
+
+    % Effektive Stichprobengröße (AR(1)-Näherung)
+    neff = n * (1 - r1) / (1 + r1);
+    neff = max(neff, 3);   % Untergrenze, um Entartung zu vermeiden
+
+    % Korrigierte, aufgeblähte Varianz
+    varS = varS_naive * (n / neff);
+
+    if S > 0
+        Z = (S-1)/sqrt(varS);
+    elseif S < 0
+        Z = (S+1)/sqrt(varS);
+    else
+        Z = 0;
+    end
+    p = 1 - erf(abs(Z)/sqrt(2));
+    H = p < alpha;
+    tau = S / (n*(n-1)/2);
+end
+
+
+% Find Change Point Linear 2
+function [breakIdx1, breakIdx2, bestSSE] = findChangepointLinear2(x, minSegLen)
+    % Erweiterung von findChangepointLinear auf zwei Bruchpunkte (3 Segmente)
+    if nargin < 2, minSegLen = 3; end
+    x = x(:); n = length(x); t = (1:n)';
+    bestSSE = Inf; breakIdx1 = NaN; breakIdx2 = NaN;
+    for k1 = minSegLen : (n - 2*minSegLen)
+        for k2 = (k1+minSegLen) : (n - minSegLen)
+            seg1_t = t(1:k1);         seg1_x = x(1:k1);
+            seg2_t = t(k1+1:k2);      seg2_x = x(k1+1:k2);
+            seg3_t = t(k2+1:end);     seg3_x = x(k2+1:end);
+            p1 = polyfit(seg1_t, seg1_x, 1);
+            p2 = polyfit(seg2_t, seg2_x, 1);
+            p3 = polyfit(seg3_t, seg3_x, 1);
+            resid1 = seg1_x - polyval(p1, seg1_t);
+            resid2 = seg2_x - polyval(p2, seg2_t);
+            resid3 = seg3_x - polyval(p3, seg3_t);
+            sse = sum(resid1.^2) + sum(resid2.^2) + sum(resid3.^2);
+            if sse < bestSSE
+                bestSSE = sse;
+                breakIdx1 = k1 + 1;
+                breakIdx2 = k2 + 1;
+            end
+        end
+    end
+end
+
+% Hobday Analyse 
+function [n_events, idx_start, idx_end] = count_events_hobday(is_below, min_duration, max_gap)
+% Eventdefinition nach Hobday et al. (2016)
+% min_duration: Mindestdauer eines Events in Messtagen (z.B. 5)
+% max_gap: maximale Lücke zwischen Events um sie zu mergen (z.B. 2)
+
+padded = [false; is_below(:); false];
+starts = find(padded(1:end-1) == false & padded(2:end) == true);
+ends   = find(padded(1:end-1) == true  & padded(2:end) == false) - 1;
+
+duration = ends - starts + 1;
+valid    = duration >= min_duration;
+starts   = starts(valid);
+ends     = ends(valid);
+
+if isempty(starts)
+    n_events  = 0;
+    idx_start = [];
+    idx_end   = [];
+    return
+end
+
+merged_starts = starts(1);
+merged_ends   = ends(1);
+
+for i = 2:length(starts)
+    gap = starts(i) - merged_ends(end) - 1;
+    if gap < max_gap
+        merged_ends(end) = ends(i);
+    else
+        merged_starts(end+1) = starts(i);
+        merged_ends(end+1)   = ends(i);
+    end
+end
+
+duration_merged = merged_ends - merged_starts + 1;
+valid_merged    = duration_merged >= min_duration;
+merged_starts   = merged_starts(valid_merged);
+merged_ends     = merged_ends(valid_merged);
+
+n_events  = length(merged_starts);
+idx_start = merged_starts(:);
+idx_end   = merged_ends(:);
+end
